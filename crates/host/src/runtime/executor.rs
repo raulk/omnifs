@@ -68,12 +68,10 @@ pub(crate) struct HttpExecutor {
 
 impl HttpExecutor {
     pub fn new(auth: Arc<AuthManager>, capability: Arc<CapabilityChecker>) -> Self {
-        // Redirects disabled: providers must not be able to bypass the
-        // capability checker by fetching an allowed URL that 302s to a
-        // private/link-local address.
         let client = reqwest::Client::builder()
             .user_agent("omnifs")
-            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("reqwest client");
         Self {

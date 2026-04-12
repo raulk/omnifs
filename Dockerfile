@@ -77,11 +77,11 @@ RUN printf '%s\n' \
 COPY --from=builder /omnifs /usr/local/bin/
 
 RUN mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
-COPY --from=providers /src/target/wasm32-wasip1/release/github_provider.wasm \
+COPY --from=providers /src/target/wasm32-wasip1/release/omnifs_provider_github.wasm \
      /root/.omnifs/plugins/
 
 RUN cat > /root/.omnifs/providers/github.toml <<'CONF'
-plugin = "github_provider.wasm"
+plugin = "omnifs_provider_github.wasm"
 mount = "github"
 root_mount = true
 

@@ -5,8 +5,7 @@
 
 use crate::fuse::FuseFs;
 use crate::omnifs::provider::types::EntryKind;
-use dashmap::DashMap;
-use fuser::{FileAttr, FileType, Generation, INodeNo};
+use fuser::{FileAttr, FileType, INodeNo};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
