@@ -242,20 +242,20 @@ pub fn resume_run_log(path: &str, result: &SingleEffectResult) -> ProviderRespon
 }
 
 pub fn unzip_logs(bytes: &[u8]) -> Vec<u8> {
-    let reader = std::io::Cursor::new(bytes);
-    let Ok(mut archive) = zip::ZipArchive::new(reader) else {
+    use rc_zip_sync::ReadZip;
+
+    let Ok(archive) = bytes.read_zip() else {
         return bytes.to_vec();
     };
     let mut output = Vec::new();
-    for index in 0..archive.len() {
-        let Ok(mut file) = archive.by_index(index) else {
-            continue;
-        };
-        if file.name().ends_with('/') {
+    for entry in archive.entries() {
+        if entry.name.ends_with('/') {
             continue;
         }
-        output.extend_from_slice(format!("=== {} ===\n", file.name()).as_bytes());
-        let _ = std::io::Read::read_to_end(&mut file, &mut output);
+        output.extend_from_slice(format!("=== {} ===\n", entry.name).as_bytes());
+        if let Ok(data) = entry.bytes() {
+            output.extend_from_slice(&data);
+        }
         if !output.ends_with(b"\n") {
             output.push(b'\n');
         }

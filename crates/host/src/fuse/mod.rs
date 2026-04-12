@@ -470,7 +470,16 @@ impl Filesystem for FuseFs {
                     self.file_cache.insert(fh.0, data);
                 }
             }
-            _ => {
+            Ok(ActionResult::Err(msg)) => {
+                tracing::warn!(path, error = msg, "provider returned error for read_file");
+                reply.error(Errno::EIO);
+            }
+            Ok(other) => {
+                tracing::warn!(path, result = ?other, "read_file returned unexpected result");
+                reply.error(Errno::EIO);
+            }
+            Err(e) => {
+                tracing::warn!(path, error = %e, "read_file runtime error");
                 reply.error(Errno::EIO);
             }
         }
