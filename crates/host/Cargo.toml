@@ -1,0 +1,38 @@
+[package]
+name = "omnifs-host"
+version = "0.1.0"
+edition = "2024"
+description = "Host runtime for the OmnIFS virtual filesystem with WASM provider support"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raulk/omnifs"
+homepage = "https://github.com/raulk/omnifs"
+
+[dependencies]
+wasmtime = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+libc = { workspace = true }
+anyhow = { workspace = true }
+dirs-next = "2"
+futures = "0.3"
+gix = { version = "0.72", default-features = false, features = ["blocking-network-client"] }
+url = "2"
+wasmtime-wasi = "43"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = "0.17"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wasmtime = { workspace = true }
+
+[lints]
+workspace = true

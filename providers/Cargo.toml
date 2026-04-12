@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["test", "omnifs-provider-github"]
+
+[profile.release]
+lto = true
+opt-level = "s"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+wildcard_imports = "allow"
+too_many_lines = "allow"
+trivially_copy_pass_by_ref = "allow"
+match_same_arms = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "allow"

@@ -1,0 +1,22 @@
+/target
+/providers/target
+
+.DS_Store
+.env
+.env.*
+*.log
+
+# Demo recording artifacts
+.ssh/
+demo.cast
+demo.gif
+demo.mp4
+
+# Generated WIT bindings (cargo component build artifacts)
+providers/*/src/bindings.rs
+
+# Internal design docs (not published)
+docs/internal/
+
+# Linear CLI workspace config
+.linear.toml
