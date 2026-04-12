@@ -1,0 +1,371 @@
+package omnifs:provider@0.1.0;
+
+// === Shared types ===
+
+interface types {
+    type correlation-id = u64;
+    type stream-id = u64;
+    type repo-id = u64;
+    type file-handle = u64;
+
+    // --- Effects (provider -> host, non-recursive) ---
+
+    variant single-effect {
+        fetch(http-request),
+        stream-open(http-request),
+        stream-recv(stream-id),
+        stream-close(stream-id),
+        ws-connect(ws-connect-request),
+        ws-send(ws-send-request),
+        ws-recv(ws-recv-request),
+        ws-close(stream-id),
+        git-open-repo(git-open-request),
+        git-list-tree(git-tree-request),
+        git-read-blob(git-blob-request),
+        git-head-ref(repo-id),
+        git-list-cached-repos(git-cache-list-request),
+        kv-get(string),
+        kv-set(kv-set-request),
+        kv-delete(string),
+        kv-list-keys(string),
+    }
+
+    variant provider-response {
+        done(action-result),
+        effect(single-effect),
+        batch(list<single-effect>),
+    }
+
+    // --- Effect results (host -> provider, non-recursive) ---
+
+    variant single-effect-result {
+        http-response(http-response),
+        stream-opened(stream-id),
+        stream-chunk(option<list<u8>>),
+        ws-connected(stream-id),
+        ws-message(option<list<u8>>),
+        ws-closed,
+        stream-closed,
+        git-repo-opened(git-repo-info),
+        git-tree-entries(list<git-tree-entry>),
+        git-blob-data(list<u8>),
+        git-ref(string),
+        git-cached-repos(list<git-cached-repo>),
+        kv-value(option<list<u8>>),
+        kv-ok,
+        kv-keys(list<string>),
+        effect-error(effect-error),
+    }
+
+    record effect-error {
+        kind: error-kind,
+        message: string,
+        retryable: bool,
+    }
+
+    enum error-kind {
+        network,
+        timeout,
+        denied,
+        not-found,
+        rate-limited,
+        version-mismatch,
+        internal,
+    }
+
+    variant effect-result {
+        single(single-effect-result),
+        batch(list<single-effect-result>),
+    }
+
+    // --- Action results (terminal) ---
+
+    variant action-result {
+        dir-entries(list<dir-entry>),
+        dir-entry-option(option<dir-entry>),
+        file-content(list<u8>),
+        file-chunk(list<u8>),
+        file-opened(file-handle),
+        mutations-planned(list<planned-mutation>),
+        mutation-executed(mutation-outcome),
+        resource-files(list<file-entry>),
+        provider-initialized(provider-info),
+        repo-tree(repo-tree-ref),
+        ok,
+        err(string),
+    }
+
+    record repo-tree-ref {
+        repo: repo-id,
+        subpath: string,
+    }
+
+    // --- Data types ---
+
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<header>,
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<header>,
+        body: list<u8>,
+    }
+
+    record header {
+        name: string,
+        value: string,
+    }
+
+    record ws-connect-request {
+        url: string,
+        headers: list<header>,
+    }
+
+    record ws-send-request {
+        id: stream-id,
+        data: list<u8>,
+    }
+
+    record ws-recv-request {
+        id: stream-id,
+    }
+
+    record git-open-request {
+        clone-url: string,
+        cache-key: string,
+    }
+
+    record git-tree-request {
+        repo: repo-id,
+        ref-name: string,
+        path: string,
+    }
+
+    record git-blob-request {
+        repo: repo-id,
+        oid: string,
+    }
+
+    record git-cache-list-request {
+        prefix: option<string>,
+    }
+
+    record git-cached-repo {
+        cache-key: string,
+    }
+
+    record git-repo-info {
+        repo: repo-id,
+    }
+
+    record git-tree-entry {
+        name: string,
+        mode: u32,
+        oid: string,
+        kind: git-entry-kind,
+    }
+
+    enum git-entry-kind {
+        blob,
+        tree,
+        commit,
+    }
+
+    record kv-set-request {
+        key: string,
+        value: list<u8>,
+    }
+
+    record log-entry {
+        level: log-level,
+        message: string,
+    }
+
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record dir-entry {
+        name: string,
+        kind: entry-kind,
+        size: option<u64>,
+    }
+
+    enum entry-kind {
+        directory,
+        file,
+    }
+
+    record file-entry {
+        path: string,
+        content: list<u8>,
+        mode: u32,
+        version-token: option<string>,
+    }
+
+    record file-change {
+        path: string,
+        kind: change-kind,
+        old-content: option<list<u8>>,
+        new-content: option<list<u8>>,
+    }
+
+    enum change-kind {
+        added,
+        modified,
+        deleted,
+    }
+
+    record planned-mutation {
+        id: string,
+        description: string,
+        depends-on: list<string>,
+        version-token: option<string>,
+        payload: list<u8>,
+    }
+
+    record mutation-outcome {
+        post-actions: list<post-action>,
+    }
+
+    variant post-action {
+        rename-path(rename-action),
+        write-file(file-entry),
+        delete-path(string),
+        set-mode(mode-action),
+    }
+
+    record rename-action {
+        source: string,
+        dest: string,
+    }
+
+    record mode-action {
+        path: string,
+        mode: u32,
+    }
+
+    record provider-info {
+        name: string,
+        version: string,
+        description: string,
+    }
+
+    record config-field {
+        name: string,
+        field-type: string,
+        required: bool,
+        default-value: option<string>,
+        description: string,
+    }
+
+    record config-schema {
+        fields: list<config-field>,
+    }
+
+    record requested-capabilities {
+        domains: list<string>,
+        auth-types: list<string>,
+        max-memory-mb: u32,
+        needs-git: bool,
+        needs-websocket: bool,
+        needs-streaming: bool,
+        refresh-interval-secs: u32,
+    }
+
+    variant provider-event {
+        file-changed(string),
+        webhook-received(list<u8>),
+        timer-tick,
+        auth-refreshed,
+    }
+}
+
+// === Provider exports ===
+
+interface lifecycle {
+    use types.{provider-response, config-schema, requested-capabilities};
+
+    initialize: func(config: list<u8>) -> provider-response;
+    shutdown: func();
+    get-config-schema: func() -> config-schema;
+    capabilities: func() -> requested-capabilities;
+}
+
+interface browse {
+    use types.{provider-response, correlation-id};
+
+    resolve-entry: func(id: correlation-id, parent-path: string, name: string)
+        -> provider-response;
+    list-entries: func(id: correlation-id, path: string)
+        -> provider-response;
+    read-file: func(id: correlation-id, path: string)
+        -> provider-response;
+    open-file: func(id: correlation-id, path: string)
+        -> provider-response;
+    read-chunk: func(id: correlation-id, handle: u64, offset: u64, len: u32)
+        -> provider-response;
+    close-file: func(handle: u64);
+}
+
+interface reconcile {
+    use types.{provider-response, correlation-id, file-change, planned-mutation};
+
+    plan-mutations: func(id: correlation-id, changes: list<file-change>)
+        -> provider-response;
+    execute: func(id: correlation-id, mutation: planned-mutation)
+        -> provider-response;
+    fetch-resource: func(id: correlation-id, resource-path: string)
+        -> provider-response;
+    list-scope: func(id: correlation-id, scope: string)
+        -> provider-response;
+}
+
+interface resume {
+    use types.{provider-response, correlation-id, effect-result};
+
+    resume: func(id: correlation-id, effect-outcome: effect-result)
+        -> provider-response;
+    cancel: func(id: correlation-id);
+}
+
+interface notify {
+    use types.{provider-response, correlation-id, provider-event};
+
+    on-event: func(id: correlation-id, event: provider-event)
+        -> provider-response;
+}
+
+// === Host import ===
+
+interface log {
+    use types.{log-entry};
+
+    log: func(entry: log-entry);
+}
+
+// === Worlds ===
+
+world provider-core {
+    import log;
+    export lifecycle;
+    export browse;
+    export resume;
+}
+
+world provider {
+    import log;
+    export lifecycle;
+    export browse;
+    export resume;
+    export reconcile;
+    export notify;
+}

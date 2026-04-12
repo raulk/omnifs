@@ -1,0 +1,12 @@
+target/
+providers/target/
+.git/
+.ssh/
+.env
+.env.*
+*.log
+*.gif
+*.mp4
+*.cast
+demo.*
+docs/
