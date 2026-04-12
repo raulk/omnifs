@@ -6,7 +6,7 @@
 
 pub(crate) mod inode;
 
-use crate::omnifs::provider::types::{ActionResult, DirEntry, EntryKind};
+use crate::omnifs::provider::types::{ActionResult, EntryKind};
 use crate::registry::ProviderRegistry;
 use crate::runtime::EffectRuntime;
 use dashmap::DashMap;
@@ -142,6 +142,34 @@ impl Filesystem for FuseFs {
             .rt
             .block_on(runtime.call_resolve_entry(&parent_path, name_str))
         {
+            Ok(ActionResult::DisownedTree(tree_ref)) => {
+                if let Some(real_root) = runtime.resolve_tree_ref(tree_ref) {
+                    // Set real_path on the parent so future lookups use passthrough.
+                    if let Some(mut parent_entry) = self.inodes.get_mut(&parent.0) {
+                        if parent_entry.real_path.is_none() {
+                            parent_entry.real_path = Some(real_root.clone());
+                        }
+                    }
+                    let child_rp = real_root.join(name_str);
+                    match std::fs::symlink_metadata(&child_rp) {
+                        Ok(meta) => {
+                            let kind = if meta.is_dir() {
+                                EntryKind::Directory
+                            } else {
+                                EntryKind::File
+                            };
+                            let ino = self.get_or_alloc_ino_real(
+                                &mount, &child_path, kind, meta.len(), child_rp,
+                            );
+                            let attr = self.attr_from_metadata(ino, &meta);
+                            reply.entry(&TTL, &attr, Generation(0));
+                        }
+                        Err(_) => reply.error(Errno::ENOENT),
+                    }
+                } else {
+                    reply.error(Errno::EIO);
+                }
+            }
             Ok(ActionResult::DirEntryOption(Some(entry))) => {
                 let size = entry.size.unwrap_or(0);
                 let ino = self.get_or_alloc_ino(&mount, &child_path, entry.kind, size);
@@ -265,6 +293,54 @@ impl Filesystem for FuseFs {
         };
 
         match self.rt.block_on(runtime.call_list_entries(&path)) {
+            Ok(ActionResult::DisownedTree(tree_ref)) => {
+                if let Some(real_root) = runtime.resolve_tree_ref(tree_ref) {
+                    // Set real_path on this inode so future operations use passthrough.
+                    if let Some(mut entry) = self.inodes.get_mut(&ino.0) {
+                        if entry.real_path.is_none() {
+                            entry.real_path = Some(real_root.clone());
+                        }
+                    }
+                    match std::fs::read_dir(&real_root) {
+                        Ok(read_dir) => {
+                            let mut snapshot = Vec::new();
+                            for dir_entry in read_dir.flatten() {
+                                let fname = dir_entry.file_name();
+                                let Some(fname_str) = fname.to_str() else {
+                                    continue;
+                                };
+                                let child_rp = dir_entry.path();
+                                let Ok(meta) = std::fs::symlink_metadata(&child_rp) else {
+                                    continue;
+                                };
+                                let kind = if meta.is_dir() {
+                                    EntryKind::Directory
+                                } else {
+                                    EntryKind::File
+                                };
+                                let child_path = if path.is_empty() {
+                                    fname_str.to_string()
+                                } else {
+                                    format!("{path}/{fname_str}")
+                                };
+                                let child_ino = self.get_or_alloc_ino_real(
+                                    &mount,
+                                    &child_path,
+                                    kind,
+                                    meta.len(),
+                                    child_rp,
+                                );
+                                snapshot.push((child_ino, fname_str.to_string(), kind));
+                            }
+                            self.dir_snapshots.insert(fh, snapshot);
+                            reply.opened(FuseFileHandle(fh), FopenFlags::empty());
+                        }
+                        Err(_) => reply.error(Errno::EIO),
+                    }
+                } else {
+                    reply.error(Errno::EIO);
+                }
+            }
             Ok(ActionResult::DirEntries(dir_entries)) => {
                 let mut snapshot = Vec::with_capacity(dir_entries.len());
                 for e in dir_entries {

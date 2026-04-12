@@ -310,7 +310,7 @@ impl EffectRuntime {
         loop {
             match response {
                 wit_types::ProviderResponse::Done(result) => {
-                    return Ok(self.resolve_repo_tree(result));
+                    return Ok(result);
                 }
                 wit_types::ProviderResponse::Effect(effect) => {
                     let result = self.execute_single_effect(&effect).await;
@@ -336,92 +336,10 @@ impl EffectRuntime {
         }
     }
 
-    /// If the provider returned a `RepoTree` action result, resolve it to
-    /// a concrete `DirEntryOption` or `DirEntries` by reading from the local
-    /// clone. This keeps FUSE unaware of `repo-id`s.
-    fn resolve_repo_tree(&self, result: wit_types::ActionResult) -> wit_types::ActionResult {
-        let wit_types::ActionResult::RepoTree(ref rtref) = result else {
-            return result;
-        };
-
-        let Some(clone_root) = self.git.repo_path(rtref.repo) else {
-            tracing::warn!(repo_id = rtref.repo, "repo-tree: unknown repo-id");
-            return wit_types::ActionResult::Err("unknown repo-id".to_string());
-        };
-
-        let joined = if rtref.subpath.is_empty() {
-            clone_root.clone()
-        } else {
-            clone_root.join(&rtref.subpath)
-        };
-
-        // Validate the subpath doesn't escape the clone root.
-        let canonical_root = match clone_root.canonicalize() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "repo-tree: failed to canonicalize clone root");
-                return wit_types::ActionResult::Err("clone root not found".to_string());
-            }
-        };
-        let Ok(canonical_joined) = joined.canonicalize() else {
-            // Path doesn't exist on disk.
-            return wit_types::ActionResult::DirEntryOption(None);
-        };
-        if !canonical_joined.starts_with(&canonical_root) {
-            tracing::warn!(
-                subpath = rtref.subpath,
-                "repo-tree: path escapes clone root"
-            );
-            return wit_types::ActionResult::DirEntryOption(None);
-        }
-
-        // Stat the resolved path and return appropriate result.
-        match std::fs::symlink_metadata(&joined) {
-            Ok(meta) if meta.is_dir() => {
-                // List directory contents.
-                match std::fs::read_dir(&joined) {
-                    Ok(read_dir) => {
-                        let mut entries = Vec::new();
-                        for dir_entry in read_dir.flatten() {
-                            let Some(name) = dir_entry.file_name().to_str().map(String::from)
-                            else {
-                                continue;
-                            };
-                            let Ok(meta) = std::fs::symlink_metadata(dir_entry.path()) else {
-                                continue;
-                            };
-                            let kind = if meta.is_dir() {
-                                wit_types::EntryKind::Directory
-                            } else {
-                                wit_types::EntryKind::File
-                            };
-                            entries.push(wit_types::DirEntry {
-                                name,
-                                kind,
-                                size: Some(meta.len()),
-                            });
-                        }
-                        entries.sort_by(|a, b| a.name.cmp(&b.name));
-                        wit_types::ActionResult::DirEntries(entries)
-                    }
-                    Err(_) => wit_types::ActionResult::DirEntryOption(None),
-                }
-            }
-            Ok(meta) => {
-                // File or symlink: return as single entry.
-                let name = joined
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                wit_types::ActionResult::DirEntryOption(Some(wit_types::DirEntry {
-                    name,
-                    kind: wit_types::EntryKind::File,
-                    size: Some(meta.len()),
-                }))
-            }
-            Err(_) => wit_types::ActionResult::DirEntryOption(None),
-        }
+    /// Resolve a tree-ref handle to a real filesystem path.
+    /// Returns the clone directory for the given handle.
+    pub fn resolve_tree_ref(&self, tree_ref: u64) -> Option<std::path::PathBuf> {
+        self.git.repo_path(tree_ref)
     }
 
     fn resolve_response_sync(
@@ -589,7 +507,10 @@ fn effect_response_to_wit(resp: EffectResponse) -> wit_types::SingleEffectResult
 fn git_response_to_wit(resp: EffectResponse) -> wit_types::SingleEffectResult {
     match resp {
         EffectResponse::GitRepoOpened(id) => {
-            wit_types::SingleEffectResult::GitRepoOpened(wit_types::GitRepoInfo { repo: id })
+            wit_types::SingleEffectResult::GitRepoOpened(wit_types::GitRepoInfo {
+                repo: id,
+                tree: id,
+            })
         }
         EffectResponse::GitTreeEntries(entries) => wit_types::SingleEffectResult::GitTreeEntries(
             entries

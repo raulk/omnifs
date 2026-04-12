@@ -82,6 +82,167 @@ pub fn resume_cached_repos(
     }
 }
 
+/// Handle owner profile response. Extracts owner kind and `public_repos` count,
+/// then dispatches all repo listing pages as a parallel Batch.
+pub fn resume_owner_profile(
+    id: u64,
+    path: &str,
+    is_org_fallback: bool,
+    result: &SingleEffectResult,
+) -> ProviderResponse {
+    let Some(FsPath::Owner { owner }) = FsPath::parse(path) else {
+        return err("expected owner path");
+    };
+
+    let status = match result {
+        SingleEffectResult::HttpResponse(resp) => resp.status,
+        _ => 0,
+    };
+    if status == 404 {
+        if is_org_fallback {
+            let _ = with_state(|state| {
+                let tick = state.cache.current_tick();
+                state.negative_owners.insert(owner.to_string(), tick);
+            });
+            return ProviderResponse::Done(ActionResult::DirEntries(vec![]));
+        }
+        return dispatch(
+            id,
+            Continuation::FetchingOwnerProfile {
+                path: path.to_string(),
+                is_org_fallback: true,
+            },
+            crate::api::github_get(&format!("/orgs/{owner}")),
+        );
+    }
+
+    if is_unauthorized(result) {
+        enter_cache_only();
+        return dispatch(
+            id,
+            Continuation::ListingCachedRepos {
+                path: path.to_string(),
+                mode: super::CachedRepoListMode::Owner,
+            },
+            SingleEffect::GitListCachedRepos(GitCacheListRequest {
+                prefix: Some(format!("github.com/{owner}/")),
+            }),
+        );
+    }
+
+    let body = match super::extract_http_body(result) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let json = match crate::api::parse_json(body) {
+        Ok(j) => j,
+        Err(e) => return err(&e),
+    };
+
+    let owner_kind = match json.get("type").and_then(|v| v.as_str()) {
+        Some("Organization") => crate::OwnerKind::Org,
+        _ => crate::OwnerKind::User,
+    };
+    let _ = with_state(|state| {
+        state.owner_kinds.insert(owner.to_string(), owner_kind);
+        state.negative_owners.remove(owner);
+    });
+
+    let public_repos = json
+        .get("public_repos")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+
+    let per_page = 100u64;
+    #[allow(clippy::cast_possible_truncation)]
+    let page_count = public_repos.div_ceil(per_page).clamp(1, 50) as u32;
+
+    let repos_path = match owner_kind {
+        crate::OwnerKind::Org => format!("/orgs/{owner}/repos?per_page=100&sort=updated"),
+        crate::OwnerKind::User => format!("/users/{owner}/repos?per_page=100&sort=updated"),
+    };
+
+    if page_count <= 1 {
+        return dispatch(
+            id,
+            Continuation::FetchingRepoPages {
+                path: path.to_string(),
+            },
+            crate::api::github_get(&repos_path),
+        );
+    }
+
+    let fetches: Vec<SingleEffect> = (1..=page_count)
+        .map(|page| crate::api::github_get(&format!("{repos_path}&page={page}")))
+        .collect();
+
+    match with_state(|state| {
+        state.pending.insert(
+            id,
+            Continuation::FetchingRepoPages {
+                path: path.to_string(),
+            },
+        );
+    }) {
+        Ok(()) => ProviderResponse::Batch(fetches),
+        Err(e) => err(&e),
+    }
+}
+
+/// Handle repo listing pages (single or batch). Merge results, cache, return entries.
+pub fn resume_repo_pages(
+    _id: u64,
+    path: &str,
+    effect_outcome: &EffectResult,
+) -> ProviderResponse {
+    let Some(FsPath::Owner { owner }) = FsPath::parse(path) else {
+        return err("expected owner path");
+    };
+
+    let results: Vec<&SingleEffectResult> = match effect_outcome {
+        EffectResult::Single(r) => vec![r],
+        EffectResult::Batch(results) => results.iter().collect(),
+    };
+
+    let mut repos = Vec::new();
+    for result in results {
+        if let SingleEffectResult::HttpResponse(resp) = result
+            && resp.status < 400
+        {
+            super::check_rate_limit(resp);
+            if let Ok(json) = crate::api::parse_json(&resp.body)
+                && let Some(arr) = json.as_array()
+            {
+                for item in arr {
+                    if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                        repos.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    repos.sort();
+    repos.dedup();
+
+    let _ = with_state(|state| {
+        let tick = state.cache.current_tick();
+        state
+            .owner_repos_cache
+            .insert(owner.to_string(), (tick, repos.clone()));
+    });
+
+    let entries = repos
+        .into_iter()
+        .map(|name| DirEntry {
+            name,
+            kind: EntryKind::Directory,
+            size: None,
+        })
+        .collect();
+    ProviderResponse::Done(ActionResult::DirEntries(entries))
+}
+
 /// Handle page 1 of a list response. For search API (issues/PRs), if
 /// `total_count` > 100, dispatch remaining pages as a Batch for parallel fetch.
 pub fn resume_list_first_page(

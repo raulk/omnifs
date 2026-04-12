@@ -51,6 +51,13 @@ pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
         Continuation::ListingCachedRepos { path, mode } => {
             resources::resume_cached_repos(&path, &mode, result)
         }
+        Continuation::FetchingOwnerProfile {
+            path,
+            is_org_fallback,
+        } => resources::resume_owner_profile(id, &path, is_org_fallback, result),
+        Continuation::FetchingRepoPages { path } => {
+            resources::resume_repo_pages(id, &path, &effect_outcome)
+        }
         Continuation::FetchingFirstPage {
             path,
             is_org_fallback,
@@ -65,27 +72,10 @@ pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
             files::resume_validating_resource(&path, &name, result)
         }
         Continuation::FetchingComments { path } => files::resume_comments(&path, result),
-        Continuation::OpeningRepo { tree_path } => git::resume_open_repo(id, &tree_path, result),
-        Continuation::GettingHeadRef { repo_id, tree_path } => {
-            git::resume_head_ref(id, repo_id, &tree_path, result)
-        }
-        Continuation::ListingTree => git::resume_listing_tree(result),
+        Continuation::DisowningRepo => git::resume_open_repo_disown(id, result),
         Continuation::FetchingDiff { path } => events::resume_diff(&path, result),
         Continuation::FetchingRunLog { path } => events::resume_run_log(&path, result),
         Continuation::FetchingEvents { repos } => events::resume_events(&repos, &effect_outcome),
-        Continuation::ResolvingBlobOpen { tree_path } => {
-            git::resume_resolving_blob_open(id, &tree_path, result)
-        }
-        Continuation::ResolvingBlobHead { repo_id, tree_path } => {
-            git::resume_resolving_blob_head(id, repo_id, &tree_path, result)
-        }
-        Continuation::ResolvingBlobTree {
-            repo_id,
-            ref_name,
-            parent,
-            filename,
-        } => git::resume_resolving_blob_tree(id, repo_id, &ref_name, &parent, &filename, result),
-        Continuation::ResolvingBlobRead => git::resume_resolving_blob_read(result),
     }
 }
 

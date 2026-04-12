@@ -27,18 +27,29 @@ thread_local! {
     static STATE: RefCell<Option<ProviderState>> = const { RefCell::new(None) };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerKind {
+    User,
+    Org,
+}
+
 struct ProviderState {
     pending: HashMap<u64, Continuation>,
     cache: cache::Cache,
     /// Negative cache for owners that returned 404 from both /users/ and /orgs/.
-    /// Maps owner name to the tick at which it was cached.
     negative_owners: HashMap<String, u64>,
+    /// Cached owner type (user vs org) to skip the 404 fallback on subsequent listings.
+    owner_kinds: HashMap<String, OwnerKind>,
+    /// Cached repo lists per owner, with the tick at which they were fetched.
+    owner_repos_cache: HashMap<String, (u64, Vec<String>)>,
     /// Last seen X-RateLimit-Remaining value from GitHub API responses.
     rate_limit_remaining: Option<u32>,
     cache_only: bool,
     active_repos: HashMap<String, u64>,
     event_etags: HashMap<String, String>,
 }
+
+const OWNER_REPOS_CACHE_TTL: u64 = 120;
 
 enum Continuation {
     ListingCachedRepos {
@@ -50,7 +61,16 @@ enum Continuation {
         /// True when this is the org-endpoint fallback (second attempt).
         is_org_fallback: bool,
     },
-    /// Page 1 returned; now fetching remaining pages in parallel.
+    /// Fetching owner profile (/users/ or /orgs/) to determine kind and repo count.
+    FetchingOwnerProfile {
+        path: String,
+        is_org_fallback: bool,
+    },
+    /// All repo listing pages dispatched in parallel.
+    FetchingRepoPages {
+        path: String,
+    },
+    /// Page 1 returned; now fetching remaining pages in parallel (search API).
     FetchingRemainingPages {
         path: String,
         first_page_items: Vec<serde_json::Value>,
@@ -70,14 +90,8 @@ enum Continuation {
     FetchingComments {
         path: String,
     },
-    OpeningRepo {
-        tree_path: String,
-    },
-    GettingHeadRef {
-        repo_id: u64,
-        tree_path: String,
-    },
-    ListingTree,
+    /// Opening a repo to disown the subtree to FUSE passthrough.
+    DisowningRepo,
     FetchingDiff {
         path: String,
     },
@@ -87,21 +101,6 @@ enum Continuation {
     FetchingEvents {
         repos: Vec<String>,
     },
-    // Git blob read chain (read_file for _repo/ paths)
-    ResolvingBlobOpen {
-        tree_path: String,
-    },
-    ResolvingBlobHead {
-        repo_id: u64,
-        tree_path: String,
-    },
-    ResolvingBlobTree {
-        repo_id: u64,
-        ref_name: String,
-        parent: String,
-        filename: String,
-    },
-    ResolvingBlobRead,
 }
 
 enum CachedRepoListMode {
@@ -133,6 +132,8 @@ impl exports::omnifs::provider::lifecycle::Guest for GithubProvider {
                 pending: HashMap::new(),
                 cache: cache::Cache::new(),
                 negative_owners: HashMap::new(),
+                owner_kinds: HashMap::new(),
+                owner_repos_cache: HashMap::new(),
                 rate_limit_remaining: None,
                 cache_only: false,
                 active_repos: HashMap::new(),

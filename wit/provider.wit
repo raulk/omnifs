@@ -6,6 +6,7 @@ interface types {
     type correlation-id = u64;
     type stream-id = u64;
     type repo-id = u64;
+    type tree-ref = u64;
     type file-handle = u64;
 
     // --- Effects (provider -> host, non-recursive) ---
@@ -90,15 +91,11 @@ interface types {
         mutation-executed(mutation-outcome),
         resource-files(list<file-entry>),
         provider-initialized(provider-info),
-        repo-tree(repo-tree-ref),
+        disowned-tree(tree-ref),
         ok,
         err(string),
     }
 
-    record repo-tree-ref {
-        repo: repo-id,
-        subpath: string,
-    }
 
     // --- Data types ---
 
@@ -160,6 +157,7 @@ interface types {
 
     record git-repo-info {
         repo: repo-id,
+        tree: tree-ref,
     }
 
     record git-tree-entry {

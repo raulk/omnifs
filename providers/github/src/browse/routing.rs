@@ -127,8 +127,16 @@ pub fn resolve_entry(id: u64, parent_path: &str, name: &str) -> ProviderResponse
             }
         }
 
-        // Repo tree entries: default to File (directories typed via list_entries)
-        FsPath::RepoTree { .. } => file_entry(name),
+        // Repo tree: disown to FUSE passthrough
+        FsPath::RepoTree { owner, repo, .. } => {
+            let clone_url = format!("git@github.com:{owner}/{repo}.git");
+            let cache_key = format!("github.com/{owner}/{repo}");
+            dispatch(
+                id,
+                Continuation::DisowningRepo,
+                SingleEffect::GitOpenRepo(GitOpenRequest { clone_url, cache_key }),
+            )
+        }
 
         // Root level not valid here
         FsPath::Root => ProviderResponse::Done(ActionResult::DirEntryOption(None)),
@@ -180,12 +188,42 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
             if is_negative {
                 return ProviderResponse::Done(ActionResult::DirEntries(vec![]));
             }
-            let api_path = format!("/users/{owner}/repos?per_page=100&sort=updated");
+            // Return from repo list cache if fresh.
+            let cached = super::with_state(|state| {
+                if let Some((tick, repos)) = state.owner_repos_cache.get(owner) {
+                    let now = state.cache.current_tick();
+                    if now.saturating_sub(*tick) < crate::OWNER_REPOS_CACHE_TTL {
+                        return Some(repos.clone());
+                    }
+                }
+                None
+            })
+            .unwrap_or(None);
+            if let Some(repos) = cached {
+                let entries = repos
+                    .into_iter()
+                    .map(|name| DirEntry {
+                        name,
+                        kind: EntryKind::Directory,
+                        size: None,
+                    })
+                    .collect();
+                return ProviderResponse::Done(ActionResult::DirEntries(entries));
+            }
+            // Fetch owner profile to determine kind and repo count.
+            let known_kind = super::with_state(|state| {
+                state.owner_kinds.get(owner).copied()
+            })
+            .unwrap_or(None);
+            let api_path = match known_kind {
+                Some(crate::OwnerKind::Org) => format!("/orgs/{owner}"),
+                _ => format!("/users/{owner}"),
+            };
             dispatch(
                 id,
-                Continuation::FetchingFirstPage {
+                Continuation::FetchingOwnerProfile {
                     path: path.to_string(),
-                    is_org_fallback: false,
+                    is_org_fallback: known_kind == Some(crate::OwnerKind::Org),
                 },
                 api::github_get(&api_path),
             )
@@ -244,14 +282,11 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                     }]))
                 }
                 Namespace::Repo => {
-                    // Root of repo tree: open git repo
                     let clone_url = format!("git@github.com:{owner}/{repo}.git");
                     let cache_key = format!("github.com/{owner}/{repo}");
                     dispatch(
                         id,
-                        Continuation::OpeningRepo {
-                            tree_path: String::new(),
-                        },
+                        Continuation::DisowningRepo,
                         SingleEffect::GitOpenRepo(GitOpenRequest { clone_url, cache_key }),
                     )
                 }
@@ -355,20 +390,18 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
             )
         }
 
-        // Repo tree: list files via git
+        // Repo tree: disown to FUSE passthrough
         FsPath::RepoTree {
             owner,
             repo,
-            tree_path,
+            ..
         } => {
             touch_repo(owner, repo);
             let clone_url = format!("git@github.com:{owner}/{repo}.git");
             let cache_key = format!("github.com/{owner}/{repo}");
             dispatch(
                 id,
-                Continuation::OpeningRepo {
-                    tree_path: tree_path.to_string(),
-                },
+                Continuation::DisowningRepo,
                 SingleEffect::GitOpenRepo(GitOpenRequest { clone_url, cache_key }),
             )
         }
@@ -563,19 +596,17 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
             )
         }
 
-        // Git blob reads: _repo/<path>
+        // Repo tree reads: disown to FUSE passthrough
         FsPath::RepoTree {
             owner,
             repo,
-            tree_path,
+            ..
         } => {
             let clone_url = format!("git@github.com:{owner}/{repo}.git");
             let cache_key = format!("github.com/{owner}/{repo}");
             dispatch(
                 id,
-                Continuation::ResolvingBlobOpen {
-                    tree_path: tree_path.to_string(),
-                },
+                Continuation::DisowningRepo,
                 SingleEffect::GitOpenRepo(GitOpenRequest { clone_url, cache_key }),
             )
         }
