@@ -63,20 +63,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cache_dir,
         } => {
             let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
-            let config_path = config_dir
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".omnifs"));
-            let cache_path = cache_dir
-                .map(PathBuf::from)
-                .unwrap_or_else(|| config_path.join("cache"));
+            let config_path = config_dir.map_or_else(|| home.join(".omnifs"), PathBuf::from);
+            let cache_path = cache_dir.map_or_else(|| config_path.join("cache"), PathBuf::from);
             let plugin_dir = config_path.join("plugins");
             let mount_path = PathBuf::from(&mount_point);
 
             std::fs::create_dir_all(&mount_path)?;
             std::fs::create_dir_all(&cache_path)?;
 
-            // SAFETY: this runs at process startup before provider runtime tasks are spawned.
-            unsafe { std::env::set_var("OMNIFS_CACHE_DIR", &cache_path) };
+            set_cache_dir_env(&cache_path);
 
             // Construct the shared GitCloner early and pass it to all components.
             let cloner = Arc::new(GitCloner::new(cache_path));
@@ -104,7 +99,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             registry.start_timers(&rt);
 
             tracing::info!(mount_point, "starting FUSE mount");
-            omnifs_host::mount::mount_blocking(&mount_path, registry, rt)?;
+            omnifs_host::mount::mount_blocking(&mount_path, &registry, rt)?;
             Ok(())
         }
         Commands::Unmount { mount_point } => {
@@ -113,6 +108,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::PluginInfo { path: _ } => Err(anyhow::anyhow!("plugin info not yet implemented")),
     }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn set_cache_dir_env(cache_path: &std::path::Path) {
+    // SAFETY: this runs at process startup before provider runtime tasks are spawned.
+    unsafe { std::env::set_var("OMNIFS_CACHE_DIR", cache_path) };
 }
 
 #[cfg(not(target_os = "linux"))]

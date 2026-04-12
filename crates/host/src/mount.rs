@@ -13,10 +13,10 @@ use tokio::runtime::Handle;
 /// `registry.shutdown_all()` on exit regardless of how the mount ends.
 pub fn mount_blocking(
     mount_point: &Path,
-    registry: Arc<ProviderRegistry>,
+    registry: &Arc<ProviderRegistry>,
     rt: Handle,
 ) -> Result<(), MountError> {
-    let fs = FuseFs::new(rt, registry.clone());
+    let fs = FuseFs::new(rt, Arc::clone(registry));
     let config = FuseFs::mount_config();
 
     tracing::info!(mount = %mount_point.display(), "starting FUSE mount");
@@ -40,8 +40,7 @@ pub fn unmount(mount_point: &Path) -> Result<(), MountError> {
         Ok(())
     } else {
         Err(MountError::UnmountFailed(format!(
-            "fusermount exited with {}",
-            status
+            "fusermount exited with {status}"
         )))
     }
 }

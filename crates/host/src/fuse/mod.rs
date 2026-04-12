@@ -2,11 +2,11 @@
 //!
 //! Bridges the omnifs virtual filesystem to the kernel FUSE subsystem.
 //! Routes operations to WASM providers. Supports direct filesystem
-//! passthrough when providers set real_path on inodes.
+//! passthrough when providers set `real_path` on inodes.
 
 pub(crate) mod inode;
 
-use crate::omnifs::provider::types::{ActionResult, DirEntry, EntryKind};
+use crate::omnifs::provider::types::{ActionResult, EntryKind};
 use crate::registry::ProviderRegistry;
 use crate::runtime::EffectRuntime;
 use dashmap::DashMap;
@@ -17,9 +17,8 @@ use fuser::{
 };
 use inode::InodeEntry;
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use tokio::runtime::Handle;
 
@@ -73,6 +72,27 @@ impl FuseFs {
     fn runtime_for_mount(&self, mount: &str) -> Option<Arc<EffectRuntime>> {
         self.registry.get(mount).cloned()
     }
+
+    fn offset_to_start(offset: u64) -> usize {
+        match usize::try_from(offset) {
+            Ok(start) => start,
+            Err(_) => usize::MAX,
+        }
+    }
+
+    fn read_range(len: usize, offset: u64, size: u32) -> Option<std::ops::Range<usize>> {
+        let start = Self::offset_to_start(offset);
+        if start >= len {
+            return None;
+        }
+
+        let read_len = match usize::try_from(size) {
+            Ok(size) => size,
+            Err(_) => usize::MAX,
+        };
+        let end = start.saturating_add(read_len).min(len);
+        Some(start..end)
+    }
 }
 
 impl Filesystem for FuseFs {
@@ -89,7 +109,7 @@ impl Filesystem for FuseFs {
         if parent.0 == ROOT_INO && self.registry.root_mount_name().is_none() {
             if self.registry.get(name_str).is_some() {
                 let ino = self.get_or_alloc_ino(name_str, "", EntryKind::Directory, 0);
-                reply.entry(&TTL, &self.dir_attr(ino), Generation(0));
+                reply.entry(&TTL, &Self::dir_attr(ino), Generation(0));
                 return;
             }
             reply.error(Errno::ENOENT);
@@ -125,7 +145,7 @@ impl Filesystem for FuseFs {
                     };
                     let ino =
                         self.get_or_alloc_ino_real(&mount, &child_path, kind, meta.len(), child_rp);
-                    let attr = self.attr_from_metadata(ino, &meta);
+                    let attr = Self::attr_from_metadata(ino, &meta);
                     reply.entry(&TTL, &attr, Generation(0));
                 }
                 Err(_) => reply.error(Errno::ENOENT),
@@ -146,8 +166,8 @@ impl Filesystem for FuseFs {
                 let size = entry.size.unwrap_or(0);
                 let ino = self.get_or_alloc_ino(&mount, &child_path, entry.kind, size);
                 let attr = match entry.kind {
-                    EntryKind::Directory => self.dir_attr(ino),
-                    EntryKind::File => self.file_attr(ino, size),
+                    EntryKind::Directory => Self::dir_attr(ino),
+                    EntryKind::File => Self::file_attr(ino, size),
                 };
                 reply.entry(&TTL, &attr, Generation(0));
             }
@@ -162,7 +182,7 @@ impl Filesystem for FuseFs {
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FuseFileHandle>, reply: ReplyAttr) {
         if ino.0 == ROOT_INO {
-            reply.attr(&TTL, &self.dir_attr(ROOT_INO));
+            reply.attr(&TTL, &Self::dir_attr(ROOT_INO));
             return;
         }
 
@@ -175,7 +195,7 @@ impl Filesystem for FuseFs {
         if let Some(ref rp) = entry.real_path {
             match std::fs::symlink_metadata(rp) {
                 Ok(meta) => {
-                    let attr = self.attr_from_metadata(ino.0, &meta);
+                    let attr = Self::attr_from_metadata(ino.0, &meta);
                     reply.attr(&TTL, &attr);
                 }
                 Err(_) => reply.error(Errno::ENOENT),
@@ -184,8 +204,8 @@ impl Filesystem for FuseFs {
         }
 
         let attr = match entry.kind {
-            EntryKind::Directory => self.dir_attr(ino.0),
-            EntryKind::File => self.file_attr(ino.0, entry.size),
+            EntryKind::Directory => Self::dir_attr(ino.0),
+            EntryKind::File => Self::file_attr(ino.0, entry.size),
         };
         reply.attr(&TTL, &attr);
     }
@@ -299,7 +319,11 @@ impl Filesystem for FuseFs {
             return;
         };
 
-        for (index, (ino, name, kind)) in snapshot.iter().enumerate().skip(offset as usize) {
+        for (index, (ino, name, kind)) in snapshot
+            .iter()
+            .enumerate()
+            .skip(Self::offset_to_start(offset))
+        {
             let ftype = match kind {
                 EntryKind::Directory => fuser::FileType::Directory,
                 EntryKind::File => fuser::FileType::RegularFile,
@@ -339,13 +363,11 @@ impl Filesystem for FuseFs {
 
         // Serve from cache if this file handle already has data.
         if let Some(cached) = self.file_cache.get(&fh.0) {
-            let start = offset as usize;
-            let end = (start + size as usize).min(cached.len());
-            if start >= cached.len() {
+            let Some(range) = Self::read_range(cached.len(), offset, size) else {
                 reply.data(&[]);
-            } else {
-                reply.data(&cached[start..end]);
-            }
+                return;
+            };
+            reply.data(&cached[range]);
             return;
         }
 
@@ -362,15 +384,12 @@ impl Filesystem for FuseFs {
         if let Some(ref rp) = real {
             match std::fs::read(rp) {
                 Ok(data) => {
-                    let start = offset as usize;
-                    let end = (start + size as usize).min(data.len());
-                    if start >= data.len() {
-                        self.file_cache.insert(fh.0, data);
-                        reply.data(&[]);
+                    if let Some(range) = Self::read_range(data.len(), offset, size) {
+                        reply.data(&data[range]);
                     } else {
-                        reply.data(&data[start..end]);
-                        self.file_cache.insert(fh.0, data);
+                        reply.data(&[]);
                     }
+                    self.file_cache.insert(fh.0, data);
                 }
                 Err(_) => reply.error(Errno::EIO),
             }
@@ -384,15 +403,12 @@ impl Filesystem for FuseFs {
 
         match self.rt.block_on(runtime.call_read_file(&path)) {
             Ok(ActionResult::FileContent(data)) => {
-                let start = offset as usize;
-                let end = (start + size as usize).min(data.len());
-                if start >= data.len() {
-                    self.file_cache.insert(fh.0, data);
-                    reply.data(&[]);
+                if let Some(range) = Self::read_range(data.len(), offset, size) {
+                    reply.data(&data[range]);
                 } else {
-                    reply.data(&data[start..end]);
-                    self.file_cache.insert(fh.0, data);
+                    reply.data(&[]);
                 }
+                self.file_cache.insert(fh.0, data);
             }
             _ => {
                 reply.error(Errno::EIO);

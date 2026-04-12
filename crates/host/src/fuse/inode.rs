@@ -5,13 +5,12 @@
 
 use crate::fuse::FuseFs;
 use crate::omnifs::provider::types::EntryKind;
-use dashmap::DashMap;
-use fuser::{FileAttr, FileType, Generation, INodeNo};
+use fuser::{FileAttr, FileType, INodeNo};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
-/// Tracks the mapping from inode to (mount_point, path) for a provider.
+/// Tracks the mapping from inode to (`mount_point`, path) for a provider.
 pub(crate) struct InodeEntry {
     pub(crate) mount: String,
     pub(crate) path: String,
@@ -64,7 +63,7 @@ impl FuseFs {
         // Use entry API to atomically check-or-insert, avoiding a race where
         // two concurrent lookups for the same (mount, path) allocate different inodes.
         // Use and_modify to update kind/size on existing entries (stale inode fix).
-        let ino = *self
+        *self
             .path_to_inode
             .entry(key)
             .and_modify(|existing_ino| {
@@ -72,7 +71,7 @@ impl FuseFs {
                     entry.kind = kind;
                     entry.size = size;
                     if real_path.is_some() {
-                        entry.real_path = real_path.clone();
+                        entry.real_path.clone_from(&real_path);
                     }
                 }
             })
@@ -89,12 +88,12 @@ impl FuseFs {
                     },
                 );
                 ino
-            });
-        ino
+            })
     }
 
-    pub(crate) fn dir_attr(&self, ino: u64) -> FileAttr {
+    pub(crate) fn dir_attr(ino: u64) -> FileAttr {
         let now = SystemTime::now();
+        let (uid, gid) = current_uid_gid();
         FileAttr {
             ino: INodeNo(ino),
             size: 0,
@@ -106,16 +105,17 @@ impl FuseFs {
             kind: FileType::Directory,
             perm: 0o555,
             nlink: 2,
-            uid: unsafe { libc::getuid() },
-            gid: unsafe { libc::getgid() },
+            uid,
+            gid,
             rdev: 0,
             blksize: 512,
             flags: 0,
         }
     }
 
-    pub(crate) fn file_attr(&self, ino: u64, size: u64) -> FileAttr {
+    pub(crate) fn file_attr(ino: u64, size: u64) -> FileAttr {
         let now = SystemTime::now();
+        let (uid, gid) = current_uid_gid();
         FileAttr {
             ino: INodeNo(ino),
             size,
@@ -127,8 +127,8 @@ impl FuseFs {
             kind: FileType::RegularFile,
             perm: 0o444,
             nlink: 1,
-            uid: unsafe { libc::getuid() },
-            gid: unsafe { libc::getgid() },
+            uid,
+            gid,
             rdev: 0,
             blksize: 512,
             flags: 0,
@@ -136,7 +136,7 @@ impl FuseFs {
     }
 
     /// Build a `FileAttr` from real filesystem metadata.
-    pub(crate) fn attr_from_metadata(&self, ino: u64, meta: &std::fs::Metadata) -> FileAttr {
+    pub(crate) fn attr_from_metadata(ino: u64, meta: &std::fs::Metadata) -> FileAttr {
         let kind = if meta.is_dir() {
             FileType::Directory
         } else if meta.is_symlink() {
@@ -147,6 +147,7 @@ impl FuseFs {
         let perm = if meta.is_dir() { 0o555 } else { 0o444 };
         let nlink = if meta.is_dir() { 2 } else { 1 };
         let now = SystemTime::now();
+        let (uid, gid) = current_uid_gid();
 
         FileAttr {
             ino: INodeNo(ino),
@@ -159,12 +160,18 @@ impl FuseFs {
             kind,
             perm,
             nlink,
-            // SAFETY: libc::getuid() and libc::getgid() are trivially safe.
-            uid: unsafe { libc::getuid() },
-            gid: unsafe { libc::getgid() },
+            uid,
+            gid,
             rdev: 0,
             blksize: 512,
             flags: 0,
         }
     }
+}
+
+#[allow(unsafe_code)]
+fn current_uid_gid() -> (u32, u32) {
+    // SAFETY: getuid and getgid take no pointers, do not require preconditions,
+    // and cannot invalidate Rust memory.
+    unsafe { (libc::getuid(), libc::getgid()) }
 }
