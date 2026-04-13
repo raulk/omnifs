@@ -68,7 +68,7 @@ async fn test_initialize() {
 async fn test_list_root() {
     let engine = make_engine();
     let rt = make_runtime(&engine);
-    let result = rt.call_list_entries("").await.unwrap();
+    let result = rt.call_list_children("").await.unwrap();
     match result {
         ActionResult::DirEntries(listing) => {
             assert_eq!(listing.entries.len(), 1);
@@ -83,7 +83,7 @@ async fn test_list_root() {
 async fn test_list_hello_dir() {
     let engine = make_engine();
     let rt = make_runtime(&engine);
-    let result = rt.call_list_entries("hello").await.unwrap();
+    let result = rt.call_list_children("hello").await.unwrap();
     match result {
         ActionResult::DirEntries(listing) => {
             assert_eq!(listing.entries.len(), 2);
@@ -109,10 +109,10 @@ async fn test_read_file() {
 }
 
 #[tokio::test]
-async fn test_resolve_entry() {
+async fn test_lookup_child() {
     let engine = make_engine();
     let rt = make_runtime(&engine);
-    let result = rt.call_resolve_entry("", "hello").await.unwrap();
+    let result = rt.call_lookup_child("", "hello").await.unwrap();
     match result {
         ActionResult::DirEntryOption(Some(entry)) => {
             assert_eq!(entry.name, "hello");
@@ -123,10 +123,10 @@ async fn test_resolve_entry() {
 }
 
 #[tokio::test]
-async fn test_resolve_entry_not_found() {
+async fn test_lookup_child_not_found() {
     let engine = make_engine();
     let rt = make_runtime(&engine);
-    let result = rt.call_resolve_entry("", "nonexistent").await.unwrap();
+    let result = rt.call_lookup_child("", "nonexistent").await.unwrap();
     match result {
         ActionResult::DirEntryOption(None) => {}
         other => panic!("expected DirEntryOption(None), got {other:?}"),

@@ -38,7 +38,7 @@ impl exports::omnifs::provider::lifecycle::Guest for TestProvider {
 }
 
 impl exports::omnifs::provider::browse::Guest for TestProvider {
-    fn resolve_entry(
+    fn lookup_child(
         _id: u64,
         parent_path: String,
         name: String,
@@ -84,7 +84,7 @@ impl exports::omnifs::provider::browse::Guest for TestProvider {
         }
     }
 
-    fn list_entries(_id: u64, path: String) -> omnifs::provider::types::ProviderResponse {
+    fn list_children(_id: u64, path: String) -> omnifs::provider::types::ProviderResponse {
         use omnifs::provider::types::*;
         match path.as_str() {
             "" => ProviderResponse::Done(ActionResult::DirEntries(DirListing {

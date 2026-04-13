@@ -2,7 +2,7 @@
 //!
 //! Bridges the omnifs virtual filesystem to the kernel FUSE subsystem.
 //! Routes operations to WASM providers. Supports direct filesystem
-//! passthrough when providers set real_path on inodes.
+//! passthrough when providers set backing paths on nodes.
 
 pub(crate) mod inode;
 
@@ -17,7 +17,7 @@ use fuser::{
     MountOption, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     ReplyOpen, Request,
 };
-use inode::InodeEntry;
+use inode::NodeEntry;
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -59,8 +59,8 @@ impl Drop for FuseTrace {
 pub struct FuseFs {
     rt: Handle,
     registry: Arc<ProviderRegistry>,
-    inodes: DashMap<u64, InodeEntry>,
-    /// Reverse lookup: (mount, path) -> inode, for dedup.
+    inodes: DashMap<u64, NodeEntry>,
+    /// Reverse lookup: (mount name, path) -> inode, for dedup.
     path_to_inode: DashMap<(String, String), u64>,
     next_ino: AtomicU64,
     dir_snapshots: DashMap<u64, Vec<(u64, String, EntryKind)>>,
@@ -75,12 +75,12 @@ impl FuseFs {
     pub fn new(rt: Handle, registry: Arc<ProviderRegistry>) -> Self {
         let inodes = DashMap::new();
 
-        let root_entry = InodeEntry {
-            mount: registry.root_mount_name().unwrap_or("").to_string(),
+        let root_entry = NodeEntry {
+            mount_name: registry.root_mount_name().unwrap_or("").to_string(),
             path: String::new(),
             kind: EntryKind::Directory,
             size: 0,
-            real_path: None,
+            backing_path: None,
         };
         inodes.insert(ROOT_INO, root_entry);
 
@@ -156,7 +156,7 @@ impl FuseFs {
         let mount_inodes: Vec<(u64, String)> = self
             .inodes
             .iter()
-            .filter(|entry| entry.value().mount == mount)
+            .filter(|entry| entry.value().mount_name == mount)
             .map(|entry| (*entry.key(), entry.value().path.clone()))
             .collect();
 
@@ -243,15 +243,15 @@ impl Filesystem for FuseFs {
             return;
         }
         // When root_mount is set, ROOT_INO falls through to the normal
-        // provider delegation path below (its mount field is non-empty).
+        // provider delegation path below (its mount name is non-empty).
 
         let Some(parent_entry) = self.inodes.get(&parent.0) else {
             reply.error(Errno::ENOENT);
             return;
         };
-        let mount = parent_entry.mount.clone();
+        let mount_name = parent_entry.mount_name.clone();
         let parent_path = parent_entry.path.clone();
-        let parent_real = parent_entry.real_path.clone();
+        let parent_backing_path = parent_entry.backing_path.clone();
         drop(parent_entry);
 
         let child_path = if parent_path.is_empty() {
@@ -260,8 +260,8 @@ impl Filesystem for FuseFs {
             format!("{parent_path}/{name_str}")
         };
 
-        // If the parent has a real_path, resolve the child from the filesystem.
-        if let Some(ref parent_rp) = parent_real {
+        // If the parent has a backing path, resolve the child from the filesystem.
+        if let Some(ref parent_rp) = parent_backing_path {
             let child_rp = parent_rp.join(name_str);
             match std::fs::symlink_metadata(&child_rp) {
                 Ok(meta) => {
@@ -270,8 +270,13 @@ impl Filesystem for FuseFs {
                     } else {
                         EntryKind::File
                     };
-                    let ino =
-                        self.get_or_alloc_ino_real(&mount, &child_path, kind, meta.len(), child_rp);
+                    let ino = self.get_or_alloc_ino_backing(
+                        &mount_name,
+                        &child_path,
+                        kind,
+                        meta.len(),
+                        child_rp,
+                    );
                     let attr = self.attr_from_metadata(ino, &meta);
                     reply.entry(&TTL, &attr, Generation(0));
                 }
@@ -292,7 +297,7 @@ impl Filesystem for FuseFs {
         // editors, and tools like rg stat common names like .git,
         // .gitignore, node_modules on every directory visit) would each
         // generate a provider round-trip for names that cannot exist.
-        if let Some(record) = self.l0_get(&mount, parent.0, RecordKind::Dirents, None) {
+        if let Some(record) = self.l0_get(&mount_name, parent.0, RecordKind::Dirents, None) {
             if let Some(dirents) = crate::cache::DirentsPayload::deserialize(&record.payload) {
                 if dirents.exhaustive && !dirents.entries.iter().any(|e| e.name == name_str) {
                     reply.error(Errno::ENOENT);
@@ -303,7 +308,7 @@ impl Filesystem for FuseFs {
 
         // L0: check cached lookup by parent inode + child name
         if let Some(record) = self.l0_get(
-            &mount,
+            &mount_name,
             parent.0,
             RecordKind::Lookup,
             Some(name_str.to_string()),
@@ -311,14 +316,14 @@ impl Filesystem for FuseFs {
             if let Some(lookup) = crate::cache::LookupPayload::deserialize(&record.payload) {
                 match lookup {
                     crate::cache::LookupPayload::Negative => {
-                        tracing::debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount.as_str(), "negative cache hit");
+                        tracing::debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount_name.as_str(), "negative cache hit");
                         reply.error(Errno::ENOENT);
                         return;
                     }
                     crate::cache::LookupPayload::Positive { kind, size } => {
-                        tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "lookup", mount = mount.as_str(), "cache hit");
+                        tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "lookup", mount = mount_name.as_str(), "cache hit");
                         let ek = entry_kind_from_cache(kind);
-                        let ino = self.get_or_alloc_ino(&mount, &child_path, ek, size);
+                        let ino = self.get_or_alloc_ino(&mount_name, &child_path, ek, size);
                         let attr = match ek {
                             EntryKind::Directory => self.dir_attr(ino),
                             EntryKind::File => self.file_attr(ino, size),
@@ -331,7 +336,7 @@ impl Filesystem for FuseFs {
         }
 
         // L2: check cached lookup by path (through runtime)
-        let runtime = match self.runtime_for_mount(&mount) {
+        let runtime = match self.runtime_for_mount(&mount_name) {
             Some(rt) => rt,
             None => {
                 reply.error(Errno::ENOENT);
@@ -343,7 +348,7 @@ impl Filesystem for FuseFs {
             if let Some(lookup) = crate::cache::LookupPayload::deserialize(&record.payload) {
                 // Promote to L0
                 self.l0_put(
-                    &mount,
+                    &mount_name,
                     parent.0,
                     RecordKind::Lookup,
                     Some(name_str.to_string()),
@@ -351,14 +356,14 @@ impl Filesystem for FuseFs {
                 );
                 match lookup {
                     crate::cache::LookupPayload::Negative => {
-                        tracing::debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount.as_str(), "negative cache hit");
+                        tracing::debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount_name.as_str(), "negative cache hit");
                         reply.error(Errno::ENOENT);
                         return;
                     }
                     crate::cache::LookupPayload::Positive { kind, size } => {
-                        tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "lookup", mount = mount.as_str(), "cache hit");
+                        tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "lookup", mount = mount_name.as_str(), "cache hit");
                         let ek = entry_kind_from_cache(kind);
-                        let ino = self.get_or_alloc_ino(&mount, &child_path, ek, size);
+                        let ino = self.get_or_alloc_ino(&mount_name, &child_path, ek, size);
                         let attr = match ek {
                             EntryKind::Directory => self.dir_attr(ino),
                             EntryKind::File => self.file_attr(ino, size),
@@ -370,9 +375,9 @@ impl Filesystem for FuseFs {
             }
         }
 
-        self.drain_and_evict_l0(&mount);
+        self.drain_and_evict_l0(&mount_name);
 
-        let child_key = (mount.clone(), child_path.clone());
+        let child_key = (mount_name.clone(), child_path.clone());
         if let Some(ino_ref) = self.path_to_inode.get(&child_key) {
             let ino = *ino_ref;
             drop(ino_ref);
@@ -386,18 +391,18 @@ impl Filesystem for FuseFs {
             }
         }
 
-        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount.as_str(), "cache miss");
+        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount_name.as_str(), "cache miss");
 
         match self
             .rt
-            .block_on(runtime.call_resolve_entry(&parent_path, name_str))
+            .block_on(runtime.call_lookup_child(&parent_path, name_str))
         {
             Ok(ActionResult::DisownedTree(tree_ref)) => {
                 if let Some(real_root) = runtime.resolve_tree_ref(tree_ref) {
-                    // Set real_path on the parent so future lookups use passthrough.
+                    // Set backing_path on the parent so future lookups use passthrough.
                     if let Some(mut parent_entry) = self.inodes.get_mut(&parent.0) {
-                        if parent_entry.real_path.is_none() {
-                            parent_entry.real_path = Some(real_root.clone());
+                        if parent_entry.backing_path.is_none() {
+                            parent_entry.backing_path = Some(real_root.clone());
                         }
                     }
                     let child_rp = real_root.join(name_str);
@@ -408,8 +413,8 @@ impl Filesystem for FuseFs {
                             } else {
                                 EntryKind::File
                             };
-                            let ino = self.get_or_alloc_ino_real(
-                                &mount,
+                            let ino = self.get_or_alloc_ino_backing(
+                                &mount_name,
                                 &child_path,
                                 kind,
                                 meta.len(),
@@ -426,7 +431,7 @@ impl Filesystem for FuseFs {
             }
             Ok(ActionResult::DirEntryOption(Some(entry))) => {
                 let size = entry.size.unwrap_or(0);
-                let ino = self.get_or_alloc_ino(&mount, &child_path, entry.kind, size);
+                let ino = self.get_or_alloc_ino(&mount_name, &child_path, entry.kind, size);
 
                 // Write-through to L2 and L0
                 let kind_cache = cache_entry_kind(entry.kind);
@@ -441,7 +446,7 @@ impl Filesystem for FuseFs {
                 );
                 runtime.cache_put(&child_path, RecordKind::Lookup, &lookup_record);
                 self.l0_put(
-                    &mount,
+                    &mount_name,
                     parent.0,
                     RecordKind::Lookup,
                     Some(name_str.to_string()),
@@ -464,7 +469,7 @@ impl Filesystem for FuseFs {
                 );
                 runtime.cache_put(&child_path, RecordKind::Lookup, &neg_record);
                 self.l0_put(
-                    &mount,
+                    &mount_name,
                     parent.0,
                     RecordKind::Lookup,
                     Some(name_str.to_string()),
@@ -491,8 +496,8 @@ impl Filesystem for FuseFs {
             return;
         };
 
-        // Passthrough for inodes with real_path.
-        if let Some(ref rp) = entry.real_path {
+        // Passthrough for inodes with backing_path.
+        if let Some(ref rp) = entry.backing_path {
             match std::fs::symlink_metadata(rp) {
                 Ok(meta) => {
                     let attr = self.attr_from_metadata(ino.0, &meta);
@@ -534,13 +539,13 @@ impl Filesystem for FuseFs {
             reply.error(Errno::ENOENT);
             return;
         };
-        let mount = inode_entry.mount.clone();
+        let mount_name = inode_entry.mount_name.clone();
         let path = inode_entry.path.clone();
-        let real = inode_entry.real_path.clone();
+        let backing_path = inode_entry.backing_path.clone();
         drop(inode_entry);
 
-        // Passthrough for inodes with real_path.
-        if let Some(ref rp) = real {
+        // Passthrough for inodes with backing_path.
+        if let Some(ref rp) = backing_path {
             match std::fs::read_dir(rp) {
                 Ok(read_dir) => {
                     let mut snapshot = Vec::new();
@@ -563,8 +568,8 @@ impl Filesystem for FuseFs {
                         } else {
                             format!("{path}/{fname_str}")
                         };
-                        let child_ino = self.get_or_alloc_ino_real(
-                            &mount,
+                        let child_ino = self.get_or_alloc_ino_backing(
+                            &mount_name,
                             &child_path,
                             kind,
                             meta.len(),
@@ -581,9 +586,9 @@ impl Filesystem for FuseFs {
         }
 
         // L0: check cached dirents by inode
-        if let Some(record) = self.l0_get(&mount, ino.0, RecordKind::Dirents, None) {
+        if let Some(record) = self.l0_get(&mount_name, ino.0, RecordKind::Dirents, None) {
             if let Some(dirents) = crate::cache::DirentsPayload::deserialize(&record.payload) {
-                tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "opendir", mount = mount.as_str(), "cache hit");
+                tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "opendir", mount = mount_name.as_str(), "cache hit");
                 let mut snapshot = Vec::with_capacity(dirents.entries.len());
                 for e in &dirents.entries {
                     let child_path = if path.is_empty() {
@@ -592,7 +597,7 @@ impl Filesystem for FuseFs {
                         format!("{path}/{}", e.name)
                     };
                     let ek = entry_kind_from_cache(e.kind);
-                    let child_ino = self.get_or_alloc_ino(&mount, &child_path, ek, e.size);
+                    let child_ino = self.get_or_alloc_ino(&mount_name, &child_path, ek, e.size);
                     snapshot.push((child_ino, e.name.clone(), ek));
                 }
                 self.dir_snapshots.insert(fh, snapshot);
@@ -602,12 +607,18 @@ impl Filesystem for FuseFs {
         }
 
         // L2: check cached dirents by path (through runtime)
-        if let Some(runtime) = self.runtime_for_mount(&mount) {
+        if let Some(runtime) = self.runtime_for_mount(&mount_name) {
             if let Some(record) = runtime.cache_get(&path, RecordKind::Dirents) {
                 if let Some(dirents) = crate::cache::DirentsPayload::deserialize(&record.payload) {
-                    tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "opendir", mount = mount.as_str(), "cache hit");
+                    tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "opendir", mount = mount_name.as_str(), "cache hit");
                     // Promote to L0
-                    self.l0_put(&mount, ino.0, RecordKind::Dirents, None, record.clone());
+                    self.l0_put(
+                        &mount_name,
+                        ino.0,
+                        RecordKind::Dirents,
+                        None,
+                        record.clone(),
+                    );
 
                     let mut snapshot = Vec::with_capacity(dirents.entries.len());
                     for e in &dirents.entries {
@@ -617,7 +628,7 @@ impl Filesystem for FuseFs {
                             format!("{path}/{}", e.name)
                         };
                         let ek = entry_kind_from_cache(e.kind);
-                        let child_ino = self.get_or_alloc_ino(&mount, &child_path, ek, e.size);
+                        let child_ino = self.get_or_alloc_ino(&mount_name, &child_path, ek, e.size);
                         snapshot.push((child_ino, e.name.clone(), ek));
                     }
                     self.dir_snapshots.insert(fh, snapshot);
@@ -630,22 +641,22 @@ impl Filesystem for FuseFs {
             return;
         }
 
-        self.drain_and_evict_l0(&mount);
+        self.drain_and_evict_l0(&mount_name);
 
-        let Some(runtime) = self.runtime_for_mount(&mount) else {
+        let Some(runtime) = self.runtime_for_mount(&mount_name) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount.as_str(), "cache miss");
+        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount_name.as_str(), "cache miss");
 
-        match self.rt.block_on(runtime.call_list_entries(&path)) {
+        match self.rt.block_on(runtime.call_list_children(&path)) {
             Ok(ActionResult::DisownedTree(tree_ref)) => {
                 if let Some(real_root) = runtime.resolve_tree_ref(tree_ref) {
-                    // Set real_path on this inode so future operations use passthrough.
+                    // Set backing_path on this inode so future operations use passthrough.
                     if let Some(mut entry) = self.inodes.get_mut(&ino.0) {
-                        if entry.real_path.is_none() {
-                            entry.real_path = Some(real_root.clone());
+                        if entry.backing_path.is_none() {
+                            entry.backing_path = Some(real_root.clone());
                         }
                     }
                     match std::fs::read_dir(&real_root) {
@@ -670,8 +681,8 @@ impl Filesystem for FuseFs {
                                 } else {
                                     format!("{path}/{fname_str}")
                                 };
-                                let child_ino = self.get_or_alloc_ino_real(
-                                    &mount,
+                                let child_ino = self.get_or_alloc_ino_backing(
+                                    &mount_name,
                                     &child_path,
                                     kind,
                                     meta.len(),
@@ -699,7 +710,7 @@ impl Filesystem for FuseFs {
                         format!("{path}/{}", e.name)
                     };
                     let size = e.size.unwrap_or(0);
-                    let child_ino = self.get_or_alloc_ino(&mount, &child_path, e.kind, size);
+                    let child_ino = self.get_or_alloc_ino(&mount_name, &child_path, e.kind, size);
                     snapshot.push((child_ino, e.name.clone(), e.kind));
                     dirent_records.push(crate::cache::DirentRecord {
                         name: e.name.clone(),
@@ -718,10 +729,16 @@ impl Filesystem for FuseFs {
                     crate::cache::ttl::DIRENTS,
                     dirents_payload.serialize(),
                 );
-                if let Some(runtime) = self.runtime_for_mount(&mount) {
+                if let Some(runtime) = self.runtime_for_mount(&mount_name) {
                     runtime.cache_put(&path, RecordKind::Dirents, &dirents_record);
                 }
-                self.l0_put(&mount, ino.0, RecordKind::Dirents, None, dirents_record);
+                self.l0_put(
+                    &mount_name,
+                    ino.0,
+                    RecordKind::Dirents,
+                    None,
+                    dirents_record,
+                );
 
                 self.dir_snapshots.insert(fh, snapshot);
                 reply.opened(FuseFileHandle(fh), FopenFlags::empty());
@@ -805,14 +822,14 @@ impl Filesystem for FuseFs {
             reply.error(Errno::ENOENT);
             return;
         };
-        let mount = inode_entry.mount.clone();
+        let mount_name = inode_entry.mount_name.clone();
         let path = inode_entry.path.clone();
-        let real = inode_entry.real_path.clone();
+        let backing_path = inode_entry.backing_path.clone();
         drop(inode_entry);
 
         // L0: check cached file by inode
-        if let Some(record) = self.l0_get(&mount, ino.0, RecordKind::File, None) {
-            tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = mount.as_str(), "cache hit");
+        if let Some(record) = self.l0_get(&mount_name, ino.0, RecordKind::File, None) {
+            tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = mount_name.as_str(), "cache hit");
             let data = &record.payload;
             let start = offset as usize;
             let end = (start + size as usize).min(data.len());
@@ -826,13 +843,13 @@ impl Filesystem for FuseFs {
         }
 
         // L2: check cached file by path (only for non-passthrough)
-        if real.is_none() {
-            if let Some(runtime) = self.runtime_for_mount(&mount) {
+        if backing_path.is_none() {
+            if let Some(runtime) = self.runtime_for_mount(&mount_name) {
                 if let Some(record) = runtime.cache_get(&path, RecordKind::File) {
-                    tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = mount.as_str(), "cache hit");
+                    tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = mount_name.as_str(), "cache hit");
                     let data = record.payload.clone();
                     // Promote to L0
-                    self.l0_put(&mount, ino.0, RecordKind::File, None, record.clone());
+                    self.l0_put(&mount_name, ino.0, RecordKind::File, None, record.clone());
                     let start = offset as usize;
                     let end = (start + size as usize).min(data.len());
                     if start >= data.len() {
@@ -847,8 +864,8 @@ impl Filesystem for FuseFs {
             }
         }
 
-        // Passthrough for inodes with real_path.
-        if let Some(ref rp) = real {
+        // Passthrough for inodes with backing_path.
+        if let Some(ref rp) = backing_path {
             match std::fs::read(rp) {
                 Ok(data) => {
                     let start = offset as usize;
@@ -866,14 +883,14 @@ impl Filesystem for FuseFs {
             return;
         }
 
-        let Some(runtime) = self.runtime_for_mount(&mount) else {
+        let Some(runtime) = self.runtime_for_mount(&mount_name) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        self.drain_and_evict_l0(&mount);
+        self.drain_and_evict_l0(&mount_name);
 
-        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = mount.as_str(), "cache miss");
+        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = mount_name.as_str(), "cache miss");
 
         match self.rt.block_on(runtime.call_read_file(&path)) {
             Ok(ActionResult::FileContent(data)) => {
@@ -884,10 +901,10 @@ impl Filesystem for FuseFs {
                     crate::cache::ttl::PROJECTED_FILE
                 };
                 let file_record = CacheRecord::new(RecordKind::File, ttl, data.clone());
-                if let Some(rt) = self.runtime_for_mount(&mount) {
+                if let Some(rt) = self.runtime_for_mount(&mount_name) {
                     rt.cache_put(&path, RecordKind::File, &file_record);
                 }
-                self.l0_put(&mount, ino.0, RecordKind::File, None, file_record);
+                self.l0_put(&mount_name, ino.0, RecordKind::File, None, file_record);
 
                 let start = offset as usize;
                 let end = (start + size as usize).min(data.len());
@@ -941,7 +958,7 @@ impl Filesystem for FuseFs {
             reply.error(Errno::ENOENT);
             return;
         };
-        if let Some(ref rp) = entry.real_path {
+        if let Some(ref rp) = entry.backing_path {
             match std::fs::read_link(rp) {
                 Ok(target) => reply.data(target.as_os_str().as_encoded_bytes()),
                 Err(_) => reply.error(Errno::EIO),

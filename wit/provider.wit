@@ -346,9 +346,9 @@ interface lifecycle {
 interface browse {
     use types.{provider-response, correlation-id};
 
-    resolve-entry: func(id: correlation-id, parent-path: string, name: string)
+    lookup-child: func(id: correlation-id, parent-path: string, name: string)
         -> provider-response;
-    list-entries: func(id: correlation-id, path: string)
+    list-children: func(id: correlation-id, path: string)
         -> provider-response;
     read-file: func(id: correlation-id, path: string)
         -> provider-response;

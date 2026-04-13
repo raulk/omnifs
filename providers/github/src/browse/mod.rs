@@ -1,7 +1,7 @@
 //! Browse module: filesystem routing and async continuations.
 //!
-//! Routes FUSE operations to the appropriate handlers and manages the
-//! async continuation state machine for GitHub API operations.
+//! Routes provider browse requests to the appropriate handlers and manages
+//! the async continuation state machine for GitHub API operations.
 
 use crate::omnifs::provider::types::*;
 use crate::{Continuation, SingleEffect, SingleEffectResult, with_state};
@@ -20,7 +20,7 @@ mod routing;
 
 // Re-exports
 pub use events::timer_tick;
-pub use routing::{list_entries, read_file, resolve_entry};
+pub use routing::{list_children, lookup_child, read_file};
 
 // Re-export types needed by submodules
 pub(crate) use crate::CachedRepoListMode;

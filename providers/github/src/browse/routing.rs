@@ -9,7 +9,7 @@ use crate::omnifs::provider::types::*;
 use crate::path::{FsPath, Namespace, ResourceFile, ResourceKind, RunFile, StateFilter};
 use crate::{CachedRepoListMode, Continuation, SingleEffect};
 
-pub fn resolve_entry(id: u64, parent_path: &str, name: &str) -> ProviderResponse {
+pub fn lookup_child(id: u64, parent_path: &str, name: &str) -> ProviderResponse {
     let full_path = if parent_path.is_empty() {
         name.to_string()
     } else {
@@ -143,7 +143,7 @@ pub fn resolve_entry(id: u64, parent_path: &str, name: &str) -> ProviderResponse
     }
 }
 
-pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
+pub fn list_children(id: u64, path: &str) -> ProviderResponse {
     let Some(fs_path) = FsPath::parse(path) else {
         return err("invalid path");
     };

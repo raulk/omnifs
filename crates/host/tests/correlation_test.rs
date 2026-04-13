@@ -12,7 +12,7 @@ fn test_allocate_unique_ids() {
 fn test_track_and_resolve_pending() {
     let tracker = CorrelationTracker::new();
     let id = tracker.allocate();
-    tracker.mark_pending(id, "list_entries".to_string());
+    tracker.mark_pending(id, "list_children".to_string());
     assert!(tracker.is_pending(id));
     tracker.resolve(id);
     assert!(!tracker.is_pending(id));

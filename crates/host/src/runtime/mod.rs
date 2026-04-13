@@ -195,17 +195,17 @@ impl EffectRuntime {
             .call_capabilities(&mut *store)?)
     }
 
-    pub async fn call_resolve_entry(
+    pub async fn call_lookup_child(
         &self,
         parent_path: &str,
         name: &str,
     ) -> Result<wit_types::ActionResult, RuntimeError> {
         let id = self.correlations.allocate();
-        self.correlations.mark_pending(id, "resolve_entry".into());
+        self.correlations.mark_pending(id, "lookup_child".into());
 
         let response = {
             let mut store = self.store.lock();
-            self.bindings.omnifs_provider_browse().call_resolve_entry(
+            self.bindings.omnifs_provider_browse().call_lookup_child(
                 &mut *store,
                 id,
                 parent_path,
@@ -216,18 +216,18 @@ impl EffectRuntime {
         self.drive_effects(id, response).await
     }
 
-    pub async fn call_list_entries(
+    pub async fn call_list_children(
         &self,
         path: &str,
     ) -> Result<wit_types::ActionResult, RuntimeError> {
         let id = self.correlations.allocate();
-        self.correlations.mark_pending(id, "list_entries".into());
+        self.correlations.mark_pending(id, "list_children".into());
 
         let response = {
             let mut store = self.store.lock();
             self.bindings
                 .omnifs_provider_browse()
-                .call_list_entries(&mut *store, id, path)?
+                .call_list_children(&mut *store, id, path)?
         };
 
         let result = self.drive_effects(id, response).await?;
@@ -342,7 +342,12 @@ impl EffectRuntime {
     }
 
     /// Extract projected files from DirEntries and batch-write to L2.
-    fn extract_projected_files(&self, parent_path: &str, entries: &[wit_types::DirEntry], exhaustive: bool) {
+    fn extract_projected_files(
+        &self,
+        parent_path: &str,
+        entries: &[wit_types::DirEntry],
+        exhaustive: bool,
+    ) {
         use crate::cache::{
             AttrPayload, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache, LookupPayload,
             RecordKind, ttl,
@@ -470,7 +475,10 @@ impl EffectRuntime {
                     e
                 })
                 .collect();
-            wit_types::ActionResult::DirEntries(DirListing { entries: stripped, exhaustive: listing.exhaustive })
+            wit_types::ActionResult::DirEntries(DirListing {
+                entries: stripped,
+                exhaustive: listing.exhaustive,
+            })
         } else {
             result
         }

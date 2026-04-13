@@ -1,4 +1,4 @@
-//! Inode allocation and attribute generation for FUSE.
+//! Node allocation and attribute generation for FUSE.
 //!
 //! Manages the mapping from virtual paths to inode numbers with
 //! deduplication and stale entry updates.
@@ -10,15 +10,15 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
-/// Tracks the mapping from inode to (mount_point, path) for a provider.
-pub(crate) struct InodeEntry {
-    pub(crate) mount: String,
+/// Tracks the per-node state keyed by inode number for a provider mount.
+pub(crate) struct NodeEntry {
+    pub(crate) mount_name: String,
     pub(crate) path: String,
     pub(crate) kind: EntryKind,
     pub(crate) size: u64,
-    /// When set, FUSE operations for this inode serve directly from the real
+    /// When set, FUSE operations for this inode serve directly from the backing
     /// filesystem instead of routing through the Wasm provider.
-    pub(crate) real_path: Option<PathBuf>,
+    pub(crate) backing_path: Option<PathBuf>,
 }
 
 impl FuseFs {
@@ -32,34 +32,34 @@ impl FuseFs {
 
     pub(crate) fn get_or_alloc_ino(
         &self,
-        mount: &str,
+        mount_name: &str,
         path: &str,
         kind: EntryKind,
         size: u64,
     ) -> u64 {
-        self.get_or_alloc_ino_inner(mount, path, kind, size, None)
+        self.get_or_alloc_ino_inner(mount_name, path, kind, size, None)
     }
 
-    pub(crate) fn get_or_alloc_ino_real(
+    pub(crate) fn get_or_alloc_ino_backing(
         &self,
-        mount: &str,
+        mount_name: &str,
         path: &str,
         kind: EntryKind,
         size: u64,
-        real_path: PathBuf,
+        backing_path: PathBuf,
     ) -> u64 {
-        self.get_or_alloc_ino_inner(mount, path, kind, size, Some(real_path))
+        self.get_or_alloc_ino_inner(mount_name, path, kind, size, Some(backing_path))
     }
 
     fn get_or_alloc_ino_inner(
         &self,
-        mount: &str,
+        mount_name: &str,
         path: &str,
         kind: EntryKind,
         size: u64,
-        real_path: Option<PathBuf>,
+        backing_path: Option<PathBuf>,
     ) -> u64 {
-        let key = (mount.to_string(), path.to_string());
+        let key = (mount_name.to_string(), path.to_string());
         // Use entry API to atomically check-or-insert, avoiding a race where
         // two concurrent lookups for the same (mount, path) allocate different inodes.
         // Use and_modify to update kind/size on existing entries (stale inode fix).
@@ -70,8 +70,8 @@ impl FuseFs {
                 if let Some(mut entry) = self.inodes.get_mut(existing_ino) {
                     entry.kind = kind;
                     entry.size = size;
-                    if real_path.is_some() {
-                        entry.real_path = real_path.clone();
+                    if backing_path.is_some() {
+                        entry.backing_path = backing_path.clone();
                     }
                 }
             })
@@ -79,12 +79,12 @@ impl FuseFs {
                 let ino = self.alloc_ino();
                 self.inodes.insert(
                     ino,
-                    InodeEntry {
-                        mount: mount.to_string(),
+                    NodeEntry {
+                        mount_name: mount_name.to_string(),
                         path: path.to_string(),
                         kind,
                         size,
-                        real_path,
+                        backing_path,
                     },
                 );
                 ino

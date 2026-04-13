@@ -177,12 +177,12 @@ impl exports::omnifs::provider::lifecycle::Guest for GithubProvider {
 }
 
 impl exports::omnifs::provider::browse::Guest for GithubProvider {
-    fn resolve_entry(id: u64, parent_path: String, name: String) -> ProviderResponse {
-        browse::resolve_entry(id, &parent_path, &name)
+    fn lookup_child(id: u64, parent_path: String, name: String) -> ProviderResponse {
+        browse::lookup_child(id, &parent_path, &name)
     }
 
-    fn list_entries(id: u64, path: String) -> ProviderResponse {
-        browse::list_entries(id, &path)
+    fn list_children(id: u64, path: String) -> ProviderResponse {
+        browse::list_children(id, &path)
     }
 
     fn read_file(id: u64, path: String) -> ProviderResponse {
