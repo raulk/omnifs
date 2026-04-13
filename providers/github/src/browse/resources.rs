@@ -443,6 +443,41 @@ pub fn resume_list_remaining(
     super::finalize_search_results(path, &all_items)
 }
 
+fn build_projected_files(item: &serde_json::Value) -> Vec<ProjectedFile> {
+    let title = item
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+        + "\n";
+    let body = item
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+        + "\n";
+    let state = item
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+        + "\n";
+    let user = item
+        .get("user")
+        .and_then(|u| u.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+        + "\n";
+
+    vec![
+        ProjectedFile { name: "title".to_string(), content: title.into_bytes() },
+        ProjectedFile { name: "body".to_string(), content: body.into_bytes() },
+        ProjectedFile { name: "state".to_string(), content: state.into_bytes() },
+        ProjectedFile { name: "user".to_string(), content: user.into_bytes() },
+    ]
+}
+
 /// Convert a list of search result items into `DirEntries`, caching each resource.
 pub fn finalize_search_results(path: &str, items: &[serde_json::Value]) -> ProviderResponse {
     let Some(FsPath::ResourceFilter {
@@ -460,11 +495,13 @@ pub fn finalize_search_results(path: &str, items: &[serde_json::Value]) -> Provi
             let cache_key = format!("{owner}/{repo}/{api_resource}/{number}");
             let item_bytes = serde_json::to_vec(item).ok()?;
             let _ = with_state(|state| state.cache.set(cache_key, item_bytes));
+            // Build projected files from the search result JSON.
+            let projected = build_projected_files(item);
             Some(DirEntry {
                 name: number.to_string(),
                 kind: EntryKind::Directory,
                 size: None,
-                projected_files: None,
+                projected_files: Some(projected),
             })
         })
         .collect();
