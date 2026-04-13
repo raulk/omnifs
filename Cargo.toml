@@ -21,6 +21,7 @@ tempfile = "3"
 libc = "0.2"
 anyhow = "1"
 redb = "2"
+moka = { version = "0.12", features = ["sync"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

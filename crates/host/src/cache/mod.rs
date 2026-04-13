@@ -29,6 +29,7 @@ pub const L0_SKIP_THRESHOLD: usize = 256 * 1024;  // 256 KiB
 pub const L2_BULK_THRESHOLD: usize = 64 * 1024; // 64 KiB
 
 pub mod l2;
+pub mod l0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
