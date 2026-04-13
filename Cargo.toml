@@ -20,6 +20,7 @@ parking_lot = "0.12"
 tempfile = "3"
 libc = "0.2"
 anyhow = "1"
+redb = "2"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

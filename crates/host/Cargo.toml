@@ -26,6 +26,7 @@ futures = "0.3"
 gix = { version = "0.72", default-features = false, features = ["blocking-network-client"] }
 url = "2"
 wasmtime-wasi = "43"
+redb = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"
