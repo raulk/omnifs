@@ -88,6 +88,7 @@ root_mount = true
 [auth]
 type = "bearer-token"
 token_env = "GITHUB_TOKEN"
+token_file = "/run/secrets/github_token"
 
 [capabilities]
 domains = ["api.github.com"]

@@ -13,12 +13,13 @@ services:
     security_opt:
       - apparmor:unconfined
     environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN:?set GITHUB_TOKEN before running docker compose}
       SSH_AUTH_SOCK: /ssh-agent
       GIT_SSH_COMMAND: ssh -F /dev/null -o StrictHostKeyChecking=accept-new
+    secrets:
+      - github_token
     volumes:
       - ${SSH_AUTH_SOCK:?set SSH_AUTH_SOCK on the host}:/ssh-agent
-      - ./demo.sh:/work/demo.sh:ro
+      - ./scripts/demo.sh:/work/demo.sh:ro
     command:
       - bash
       - -lc
@@ -28,3 +29,7 @@ services:
         --config-dir /root/.omnifs
         --cache-dir /tmp/omnifs-cache
         >/tmp/omnifs.log 2>&1
+
+secrets:
+  github_token:
+    file: ${GITHUB_TOKEN_FILE:-.secrets/github_token}

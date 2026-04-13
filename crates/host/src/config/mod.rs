@@ -49,6 +49,7 @@ pub struct AuthConfig {
     #[serde(rename = "type")]
     pub auth_type: String,
     pub token_env: Option<String>,
+    pub token_file: Option<String>,
     pub domain: Option<String>,
     pub header: Option<String>,
     pub scopes: Option<Vec<String>>,

@@ -15,6 +15,18 @@ C_RESET=$'\033[0m'
 
 show_prompt() { print -nP "%F{yellow}%/%f\n%F{cyan}>%f " }
 
+trace_command() {
+    local cmd=$1
+    local trace_file=${OMNIFS_CMD_TRACE:-/tmp/omnifs-cmd.trace}
+    local start_ns=$(date +%s%N)
+    print -r -- "START ${start_ns} ${PWD} ${cmd}" >> "$trace_file"
+    eval $cmd
+    local rc=$?
+    local end_ns=$(date +%s%N)
+    print -r -- "END ${end_ns} ${rc} $(( (end_ns - start_ns) / 1000000 ))ms ${cmd}" >> "$trace_file"
+    return $rc
+}
+
 type_and_run() {
     local cmd=$1
     local prev=""
@@ -34,7 +46,7 @@ type_and_run() {
     done
     sleep 0.2
     print
-    eval $cmd
+    trace_command "$cmd"
     show_prompt
     sleep ${2:-0.6}
 }
@@ -47,7 +59,7 @@ type_and_run_fast() {
     done
     sleep 1.5
     print
-    eval $cmd
+    trace_command "$cmd"
     show_prompt
     sleep ${2:-0.6}
 }

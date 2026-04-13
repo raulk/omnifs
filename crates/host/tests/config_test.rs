@@ -64,4 +64,26 @@ fn test_auth_bearer_token_from_env() {
     let auth = &config.auth[0];
     assert_eq!(auth.auth_type, "bearer-token");
     assert_eq!(auth.token_env.as_deref(), Some("TEST_TOKEN"));
+    assert_eq!(auth.token_file, None);
+}
+
+#[test]
+fn test_auth_bearer_token_from_file() {
+    let toml = r#"
+        plugin = "test.wasm"
+        mount = "test"
+
+        [auth]
+        type = "bearer-token"
+        token_file = "/run/secrets/github_token"
+    "#;
+    let config = InstanceConfig::parse(toml).unwrap();
+    assert_eq!(config.auth.len(), 1);
+    let auth = &config.auth[0];
+    assert_eq!(auth.auth_type, "bearer-token");
+    assert_eq!(auth.token_env, None);
+    assert_eq!(
+        auth.token_file.as_deref(),
+        Some("/run/secrets/github_token")
+    );
 }

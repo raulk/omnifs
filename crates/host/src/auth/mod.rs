@@ -7,8 +7,8 @@ use crate::config::AuthConfig;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    #[error("environment variable {0} not set")]
-    EnvVarMissing(String),
+    #[error("{0}")]
+    CredentialSourceMissing(String),
     #[error("unsupported auth type: {0}")]
     UnsupportedType(String),
 }
@@ -48,10 +48,11 @@ impl AuthManager {
     fn build_injector(config: &AuthConfig) -> Result<AuthInjector, AuthError> {
         match config.auth_type.as_str() {
             "bearer-token" => {
-                let env_var = config.token_env.as_deref().ok_or_else(|| {
-                    AuthError::EnvVarMissing("token_env required for bearer-token".to_string())
+                let token = read_credential(config).ok_or_else(|| {
+                    AuthError::CredentialSourceMissing(
+                        "token_env or token_file required for bearer-token".to_string(),
+                    )
                 })?;
-                let token = std::env::var(env_var).ok();
                 Ok(AuthInjector {
                     domain: config.domain.clone(),
                     header_name: "Authorization".to_string(),
@@ -59,11 +60,11 @@ impl AuthManager {
                 })
             }
             "api-key-header" => {
-                let env_var = config
-                    .token_env
-                    .as_deref()
-                    .ok_or_else(|| AuthError::EnvVarMissing("token_env required".to_string()))?;
-                let key = std::env::var(env_var).ok();
+                let key = read_credential(config).ok_or_else(|| {
+                    AuthError::CredentialSourceMissing(
+                        "token_env or token_file required for api-key-header".to_string(),
+                    )
+                })?;
                 let header = config.header.as_deref().unwrap_or("X-API-Key");
                 Ok(AuthInjector {
                     domain: config.domain.clone(),
@@ -100,4 +101,19 @@ impl AuthManager {
             _ => false,
         })
     }
+}
+
+fn read_credential(config: &AuthConfig) -> Option<Option<String>> {
+    if let Some(path) = config.token_file.as_deref() {
+        let token = std::fs::read_to_string(path)
+            .ok()
+            .map(|contents| contents.trim().to_string())
+            .filter(|contents| !contents.is_empty());
+        return Some(token);
+    }
+
+    config
+        .token_env
+        .as_deref()
+        .map(|env_var| std::env::var(env_var).ok())
 }

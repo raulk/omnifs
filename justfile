@@ -44,7 +44,7 @@ start: build
       -e SSH_AUTH_SOCK=/ssh-agent \
       -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
       -v "$SSH_AUTH_SOCK:/ssh-agent" \
-      -v "$(pwd)/demo.sh:/work/demo.sh:ro" \
+      -v "$(pwd)/scripts/demo.sh:/work/demo.sh:ro" \
       {{image}} \
       bash -lc 'RUST_LOG=info exec omnifs mount --mount-point /github --config-dir /root/.omnifs --cache-dir /tmp/omnifs-cache >/tmp/omnifs.log 2>&1'
     for _ in $(seq 1 60); do

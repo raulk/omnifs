@@ -6,25 +6,29 @@ Repository-local guidance for working in `omnifs`.
 
 - This repo is currently **Linux-only**.
 - Do not reintroduce macOS-specific mount behavior, `diskutil`, or macFUSE assumptions unless explicitly requested.
-- The primary supported workflow is the **container workflow** in `justfile`.
+- The primary supported workflow is the **container workflow** in `compose.yaml`.
 
 ## Current workflow
 
 Use these commands:
 
 ```bash
-just start
-just shell
-just logs
-just stop
+mkdir -p .secrets
+gh auth token > .secrets/github_token
+docker compose up --build -d
+docker compose exec omnifs /bin/zsh
+docker compose logs omnifs
+docker compose down
 ```
 
 Behavior:
 
-- `just start` builds the image, starts a named container, and mounts omnifs at `/github` inside the container.
-- `just shell` opens an interactive `zsh` shell in the running container.
-- `just logs` prints `/tmp/omnifs.log` from the container.
-- `just stop` removes the running container.
+- `docker compose up --build -d` builds the image, starts the named container, and mounts omnifs at `/github` inside the container.
+- `docker compose exec omnifs /bin/zsh` opens an interactive `zsh` shell in the running container.
+- `docker compose logs omnifs` prints the container output. Runtime logs also remain available at `/tmp/omnifs.log` inside the container.
+- `docker compose down` removes the container.
+
+`just` remains available as a wrapper for the same container flow and as the task runner for build and test recipes.
 
 Do not add alternate local mount recipes unless explicitly requested.
 
@@ -32,8 +36,8 @@ Do not add alternate local mount recipes unless explicitly requested.
 
 Current auth model:
 
-- GitHub API auth uses `GITHUB_TOKEN`.
-- The container receives `GITHUB_TOKEN` from the host via `just start`.
+- GitHub API auth for the Docker Compose path comes from a mounted secret file at `.secrets/github_token`, exposed in the container as `/run/secrets/github_token`.
+- The baked provider config supports both `token_file` and `token_env`; Compose uses the secret file, while `just start` can still pass `GITHUB_TOKEN`.
 - Git clone currently uses SSH:
   - remote format: `git@github.com:<owner>/<repo>.git`
   - auth comes from forwarded `SSH_AUTH_SOCK`
@@ -41,14 +45,14 @@ Current auth model:
 
 Container startup requires:
 
-- host `gh auth token` works, or `GITHUB_TOKEN` is already set
+- host `gh auth token` works so `.secrets/github_token` can be created, or `GITHUB_TOKEN` is already set if using `just start`
 - host `SSH_AUTH_SOCK` is set
 - host SSH agent has a usable GitHub key loaded
 
 Useful checks on the host:
 
 ```bash
-gh auth token >/dev/null
+test -s .secrets/github_token || gh auth token > .secrets/github_token
 ssh-add -L
 ssh -T git@github.com
 ```
@@ -68,7 +72,7 @@ ssh -F /dev/null -T git@github.com
 
 When a repo path returns `Input/output error`, check:
 
-1. `just logs`
+1. `docker compose logs omnifs`
 2. SSH auth inside the container
 3. whether the mount is still present in `/proc/mounts`
 
@@ -95,7 +99,7 @@ cargo test
 Docker build:
 
 ```bash
-just build
+docker compose build
 ```
 
 The Dockerfile is intentionally cache-oriented:
@@ -118,6 +122,13 @@ Preserve that structure unless there is a clear regression or simplification wit
   - clone manager
 - Do not silently change the auth model or transport model.
 - If switching clone transport from SSH to HTTPS/token, call that out explicitly because it changes the operational contract.
+
+## Design judgment
+
+- Prefer the simpler end-to-end flow, not the purer local abstraction.
+- Bias toward single-phase designs over multi-phase orchestration on the hot path.
+- Keep data near the point where it is naturally produced and immediately consumed; split it into a second mechanism only when that separation buys something concrete.
+- Do not defend abstraction boundaries that add complexity in the common case.
 
 ## Mutation protocol
 
