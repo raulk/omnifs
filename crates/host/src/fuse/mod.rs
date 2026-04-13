@@ -187,6 +187,16 @@ impl Filesystem for FuseFs {
 
         // --- L0/L2 cache path (only for provider-delegated lookups) ---
 
+        // Dirents-implied negative: if parent dirents are cached and child is absent, ENOENT.
+        if let Some(record) = self.l0_get(&mount, parent.0, RecordKind::Dirents, None) {
+            if let Some(dirents) = crate::cache::DirentsPayload::deserialize(&record.payload) {
+                if !dirents.entries.iter().any(|e| e.name == name_str) {
+                    reply.error(Errno::ENOENT);
+                    return;
+                }
+            }
+        }
+
         // L0: check cached lookup by parent inode + child name
         if let Some(record) = self.l0_get(&mount, parent.0, RecordKind::Lookup, Some(name_str.to_string())) {
             if let Some(lookup) = crate::cache::LookupPayload::deserialize(&record.payload) {
@@ -309,6 +319,16 @@ impl Filesystem for FuseFs {
                 reply.entry(&TTL, &attr, Generation(0));
             }
             Ok(ActionResult::DirEntryOption(None)) => {
+                // Cache negative lookup.
+                let neg = crate::cache::LookupPayload::Negative;
+                let neg_record = CacheRecord::new(
+                    RecordKind::Lookup,
+                    crate::cache::ttl::LOOKUP_NEGATIVE,
+                    neg.serialize(),
+                );
+                runtime.cache_put(&child_path, RecordKind::Lookup, &neg_record);
+                self.l0_put(&mount, parent.0, RecordKind::Lookup, Some(name_str.to_string()), neg_record);
+
                 reply.error(Errno::ENOENT);
             }
             Ok(_) | Err(_) => {
