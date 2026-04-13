@@ -6,6 +6,8 @@
 
 pub(crate) mod inode;
 
+use crate::cache::l0::{BrowseCacheL0, L0Key};
+use crate::cache::{CacheRecord, RecordKind};
 use crate::omnifs::provider::types::{ActionResult, EntryKind};
 use crate::registry::ProviderRegistry;
 use crate::runtime::EffectRuntime;
@@ -17,14 +19,42 @@ use fuser::{
 };
 use inode::InodeEntry;
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::AtomicU64;
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
+
+struct FuseTrace {
+    op: &'static str,
+    detail: String,
+    start: Instant,
+}
+
+impl FuseTrace {
+    fn new(op: &'static str, detail: String) -> Self {
+        Self {
+            op,
+            detail,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for FuseTrace {
+    fn drop(&mut self) {
+        tracing::info!(
+            target: "omnifs_trace",
+            kind = "fuse",
+            op = self.op,
+            detail = self.detail.as_str(),
+            elapsed_us = self.start.elapsed().as_micros(),
+            "trace_event"
+        );
+    }
+}
 
 pub struct FuseFs {
     rt: Handle,
@@ -37,6 +67,8 @@ pub struct FuseFs {
     next_fh: AtomicU64,
     /// Caches file content by file handle; populated on first read, evicted on release.
     file_cache: DashMap<u64, Vec<u8>>,
+    /// Per-mount L0 browse caches (inode-keyed, in-memory).
+    l0_caches: DashMap<String, BrowseCacheL0>,
 }
 
 impl FuseFs {
@@ -61,6 +93,7 @@ impl FuseFs {
             dir_snapshots: DashMap::new(),
             next_fh: AtomicU64::new(1),
             file_cache: DashMap::new(),
+            l0_caches: DashMap::new(),
         }
     }
 
@@ -73,6 +106,24 @@ impl FuseFs {
     fn runtime_for_mount(&self, mount: &str) -> Option<Arc<EffectRuntime>> {
         self.registry.get(mount).cloned()
     }
+
+    /// Get or lazily create the L0 cache for a mount.
+    fn l0_for_mount(&self, mount: &str) -> dashmap::mapref::one::Ref<'_, String, BrowseCacheL0> {
+        self.l0_caches
+            .entry(mount.to_string())
+            .or_insert_with(BrowseCacheL0::new);
+        self.l0_caches.get(mount).unwrap()
+    }
+
+    fn l0_get(&self, mount: &str, inode: u64, kind: RecordKind, aux: Option<String>) -> Option<std::sync::Arc<CacheRecord>> {
+        let l0 = self.l0_for_mount(mount);
+        l0.get(&L0Key::new(inode, kind, aux))
+    }
+
+    fn l0_put(&self, mount: &str, inode: u64, kind: RecordKind, aux: Option<String>, record: CacheRecord) {
+        let l0 = self.l0_for_mount(mount);
+        l0.put(L0Key::new(inode, kind, aux), record);
+    }
 }
 
 impl Filesystem for FuseFs {
@@ -81,6 +132,7 @@ impl Filesystem for FuseFs {
             reply.error(Errno::EINVAL);
             return;
         };
+        let _trace = FuseTrace::new("lookup", format!("parent={} name={}", parent.0, name_str));
 
         let _span =
             tracing::debug_span!("fuse::lookup", parent = parent.0, name = name_str).entered();
@@ -133,6 +185,20 @@ impl Filesystem for FuseFs {
             return;
         }
 
+        let child_key = (mount.clone(), child_path.clone());
+        if let Some(ino_ref) = self.path_to_inode.get(&child_key) {
+            let ino = *ino_ref;
+            drop(ino_ref);
+            if let Some(entry) = self.inodes.get(&ino) {
+                let attr = match entry.kind {
+                    EntryKind::Directory => self.dir_attr(ino),
+                    EntryKind::File => self.file_attr(ino, entry.size),
+                };
+                reply.entry(&TTL, &attr, Generation(0));
+                return;
+            }
+        }
+
         let Some(runtime) = self.runtime_for_mount(&mount) else {
             reply.error(Errno::ENOENT);
             return;
@@ -159,7 +225,11 @@ impl Filesystem for FuseFs {
                                 EntryKind::File
                             };
                             let ino = self.get_or_alloc_ino_real(
-                                &mount, &child_path, kind, meta.len(), child_rp,
+                                &mount,
+                                &child_path,
+                                kind,
+                                meta.len(),
+                                child_rp,
                             );
                             let attr = self.attr_from_metadata(ino, &meta);
                             reply.entry(&TTL, &attr, Generation(0));
@@ -189,6 +259,7 @@ impl Filesystem for FuseFs {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FuseFileHandle>, reply: ReplyAttr) {
+        let _trace = FuseTrace::new("getattr", format!("ino={}", ino.0));
         if ino.0 == ROOT_INO {
             reply.attr(&TTL, &self.dir_attr(ROOT_INO));
             return;
@@ -219,6 +290,7 @@ impl Filesystem for FuseFs {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let _trace = FuseTrace::new("opendir", format!("ino={}", ino.0));
         let _span = tracing::debug_span!("fuse::opendir", inode = ino.0).entered();
 
         let fh = self.alloc_fh();
@@ -370,6 +442,7 @@ impl Filesystem for FuseFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        let _trace = FuseTrace::new("readdir", format!("fh={} offset={}", fh.0, offset));
         let Some(snapshot) = self.dir_snapshots.get(&fh.0) else {
             reply.error(Errno::EBADF);
             return;
@@ -396,6 +469,7 @@ impl Filesystem for FuseFs {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
+        let _trace = FuseTrace::new("releasedir", format!("fh={}", fh.0));
         self.dir_snapshots.remove(&fh.0);
         reply.ok();
     }
@@ -411,6 +485,10 @@ impl Filesystem for FuseFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        let _trace = FuseTrace::new(
+            "read",
+            format!("ino={} fh={} offset={} size={}", ino.0, fh.0, offset, size),
+        );
         let _span = tracing::debug_span!("fuse::read", inode = ino.0, offset, size).entered();
 
         // Serve from cache if this file handle already has data.
@@ -486,6 +564,7 @@ impl Filesystem for FuseFs {
     }
 
     fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let _trace = FuseTrace::new("open", String::new());
         let fh = self.alloc_fh();
         reply.opened(FuseFileHandle(fh), FopenFlags::empty());
     }
@@ -500,11 +579,13 @@ impl Filesystem for FuseFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        let _trace = FuseTrace::new("release", format!("fh={}", fh.0));
         self.file_cache.remove(&fh.0);
         reply.ok();
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let _trace = FuseTrace::new("readlink", format!("ino={}", ino.0));
         let Some(entry) = self.inodes.get(&ino.0) else {
             reply.error(Errno::ENOENT);
             return;
