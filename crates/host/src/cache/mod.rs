@@ -1,0 +1,188 @@
+//! Host browse cache types and serialization.
+//!
+//! Defines the shared types used by both L0 (in-memory moka) and
+//! L2 (durable redb) cache tiers.
+//!
+//! Submodule declarations (`pub mod l0`, `pub mod l2`) are added
+//! incrementally in Tasks 3 and 4 as each tier is implemented.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub const SCHEMA_VERSION: u8 = 1;
+
+/// TTL constants by record class.
+pub mod ttl {
+    use std::time::Duration;
+    pub const DIRENTS: Duration = Duration::from_secs(120);
+    pub const ATTR: Duration = Duration::from_secs(300);
+    pub const LOOKUP_POSITIVE: Duration = Duration::from_secs(300);
+    pub const LOOKUP_NEGATIVE: Duration = Duration::from_secs(30);
+    pub const PROJECTED_FILE: Duration = Duration::from_secs(600);
+    pub const BULK_FILE: Duration = Duration::from_secs(3600);
+}
+
+/// L0 sizing constants.
+pub const L0_MAX_WEIGHT: u64 = 32 * 1024 * 1024; // 32 MiB per provider instance
+pub const L0_SKIP_THRESHOLD: usize = 256 * 1024;  // 256 KiB
+
+/// L2 table routing threshold.
+pub const L2_BULK_THRESHOLD: usize = 64 * 1024; // 64 KiB
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum RecordKind {
+    Lookup = 0,
+    Attr = 1,
+    Dirents = 2,
+    File = 3,
+}
+
+impl RecordKind {
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Lookup),
+            1 => Some(Self::Attr),
+            2 => Some(Self::Dirents),
+            3 => Some(Self::File),
+            _ => None,
+        }
+    }
+}
+
+/// Mirror of WIT EntryKind for cache payloads, avoiding a dependency
+/// on the generated WIT types in the cache module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[repr(u8)]
+pub enum EntryKindCache {
+    Directory = 0,
+    File = 1,
+}
+
+// No manual from_u8 needed; serde handles deserialization via postcard.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheRecord {
+    pub schema_version: u8,
+    pub kind: RecordKind,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub payload: Vec<u8>,
+}
+
+impl CacheRecord {
+    /// Create a new record with the given kind, TTL, and payload.
+    pub fn new(kind: RecordKind, ttl: Duration, payload: Vec<u8>) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            schema_version: SCHEMA_VERSION,
+            kind,
+            created_at: now,
+            expires_at: now + ttl.as_secs(),
+            payload,
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        now >= self.expires_at
+    }
+
+    pub fn ttl_duration(&self) -> Duration {
+        Duration::from_secs(self.expires_at.saturating_sub(self.created_at))
+    }
+
+    /// Serialize to bytes: [schema_version:1][kind:1][created_at:8][expires_at:8][payload:*]
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(18 + self.payload.len());
+        buf.push(self.schema_version);
+        buf.push(self.kind as u8);
+        buf.extend_from_slice(&self.created_at.to_be_bytes());
+        buf.extend_from_slice(&self.expires_at.to_be_bytes());
+        buf.extend_from_slice(&self.payload);
+        buf
+    }
+
+    /// Deserialize from bytes. Returns None if schema version is unrecognized.
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 18 {
+            return None;
+        }
+        let schema_version = bytes[0];
+        if schema_version != SCHEMA_VERSION {
+            return None;
+        }
+        let kind = RecordKind::from_u8(bytes[1])?;
+        let created_at = u64::from_be_bytes(bytes[2..10].try_into().ok()?);
+        let expires_at = u64::from_be_bytes(bytes[10..18].try_into().ok()?);
+        let payload = bytes[18..].to_vec();
+        Some(Self {
+            schema_version,
+            kind,
+            created_at,
+            expires_at,
+            payload,
+        })
+    }
+}
+
+// --- Payload types (serialized via postcard) ---
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LookupPayload {
+    Positive { kind: EntryKindCache, size: u64 },
+    Negative,
+}
+
+impl LookupPayload {
+    pub fn serialize(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("LookupPayload serialization is infallible")
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        postcard::from_bytes(bytes).ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttrPayload {
+    pub kind: EntryKindCache,
+    pub size: u64,
+}
+
+impl AttrPayload {
+    pub fn serialize(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("AttrPayload serialization is infallible")
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        postcard::from_bytes(bytes).ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirentRecord {
+    pub name: String,
+    pub kind: EntryKindCache,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirentsPayload {
+    pub entries: Vec<DirentRecord>,
+}
+
+impl DirentsPayload {
+    pub fn serialize(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("DirentsPayload serialization is infallible")
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
+        postcard::from_bytes(bytes).ok()
+    }
+}

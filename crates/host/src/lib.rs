@@ -10,6 +10,7 @@
 //! - `config`: Instance configuration and schema validation
 
 pub mod auth;
+pub mod cache;
 pub mod config;
 #[cfg(target_os = "linux")]
 pub mod fuse;
