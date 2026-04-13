@@ -99,6 +99,16 @@ just logs    # view runtime log
 just stop    # tear down
 ```
 
+Or with Docker Compose:
+
+```bash
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
+docker compose up --build -d
+docker compose exec omnifs /bin/zsh
+docker compose logs omnifs
+docker compose down
+```
+
 ## Status
 
 Pre-release v0.1.0. This is a proof of concept that focuses on the container workflow on Linux.

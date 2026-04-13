@@ -1,0 +1,30 @@
+name: omnifs
+
+services:
+  omnifs:
+    build:
+      context: .
+    image: omnifs-dev
+    container_name: omnifs-shell
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?set GITHUB_TOKEN before running docker compose}
+      SSH_AUTH_SOCK: /ssh-agent
+      GIT_SSH_COMMAND: ssh -F /dev/null -o StrictHostKeyChecking=accept-new
+    volumes:
+      - ${SSH_AUTH_SOCK:?set SSH_AUTH_SOCK on the host}:/ssh-agent
+      - ./demo.sh:/work/demo.sh:ro
+    command:
+      - bash
+      - -lc
+      - >
+        RUST_LOG=info exec omnifs mount
+        --mount-point /github
+        --config-dir /root/.omnifs
+        --cache-dir /tmp/omnifs-cache
+        >/tmp/omnifs.log 2>&1
