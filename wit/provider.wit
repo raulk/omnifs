@@ -84,7 +84,7 @@ interface types {
     // --- Action results (terminal) ---
 
     variant action-result {
-        dir-entries(list<dir-entry>),
+        dir-entries(dir-listing),
         dir-entry-option(option<dir-entry>),
         file-content(list<u8>),
         file-chunk(list<u8>),
@@ -195,6 +195,39 @@ interface types {
         info,
         warn,
         error,
+    }
+
+    /// A directory listing returned by a provider, pairing the child
+    /// entries with a signal about how the host should interpret absence.
+    ///
+    /// The host caches listings to accelerate readdir and lookup. On a
+    /// lookup for "does child X exist in directory D?", the host can
+    /// answer ENOENT from a cached listing of D without a provider
+    /// round-trip, but only when the listing is known to be exhaustive.
+    /// This matters because FUSE clients (shells, editors, ripgrep)
+    /// routinely stat names that cannot exist in a projected filesystem,
+    /// and each miss would otherwise be a blocking call into the
+    /// provider.
+    record dir-listing {
+        entries: list<dir-entry>,
+
+        /// Whether every immediate child of this directory is present
+        /// in `entries`.
+        ///
+        /// When true, absence from the entry list is a sound negative
+        /// lookup: the host may return ENOENT for any name not listed
+        /// without consulting the provider. This property applies only
+        /// to immediate child names; it says nothing about freshness,
+        /// metadata accuracy, or recursive subtree completeness.
+        /// Freshness is governed separately by TTL and invalidation.
+        ///
+        /// Set true when the set of children is structurally known
+        /// (fixed schemas, confirmed empties). Set false when the
+        /// listing comes from a paginated API, a cache-only subset,
+        /// a capped query, or any source that may omit valid children.
+        /// The host still caches non-exhaustive entries for readdir;
+        /// it just will not use them to deny lookups.
+        exhaustive: bool,
     }
 
     record dir-entry {

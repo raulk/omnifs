@@ -711,6 +711,7 @@ impl Filesystem for FuseFs {
                 // Write-through dirents to L2 + L0
                 let dirents_payload = crate::cache::DirentsPayload {
                     entries: dirent_records,
+                    exhaustive: listing.exhaustive,
                 };
                 let dirents_record = CacheRecord::new(
                     RecordKind::Dirents,
