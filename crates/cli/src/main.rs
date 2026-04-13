@@ -88,7 +88,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 "loading providers"
             );
 
-            let registry = ProviderRegistry::load(&config_path, &plugin_dir, &cloner)?;
+            let registry = ProviderRegistry::load(&config_path, &plugin_dir, &cloner, cloner.cache_dir())?;
 
             for mount_name in registry.mounts() {
                 if let Some(runtime) = registry.get(&mount_name) {

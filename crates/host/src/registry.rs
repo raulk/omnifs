@@ -30,6 +30,7 @@ impl ProviderRegistry {
         config_dir: &Path,
         plugin_dir: &Path,
         cloner: &Arc<GitCloner>,
+        cache_dir: &Path,
     ) -> Result<Self, RegistryError> {
         let mut wasm_config = wasmtime::Config::new();
         wasm_config.wasm_component_model(true);
@@ -58,7 +59,7 @@ impl ProviderRegistry {
                 continue;
             }
 
-            match Self::load_instance(&engine, &path, plugin_dir, cloner) {
+            match Self::load_instance(&engine, &path, plugin_dir, cloner, cache_dir) {
                 Ok((mount, is_root, runtime)) => {
                     if instances.contains_key(&mount) {
                         tracing::warn!(
@@ -103,6 +104,7 @@ impl ProviderRegistry {
         config_path: &Path,
         plugin_dir: &Path,
         cloner: &Arc<GitCloner>,
+        cache_dir: &Path,
     ) -> Result<(String, bool, EffectRuntime), RegistryError> {
         let config = InstanceConfig::from_file(config_path)
             .map_err(|e| RegistryError::ConfigError(e.to_string()))?;
@@ -115,7 +117,7 @@ impl ProviderRegistry {
         }
 
         let is_root = config.root_mount;
-        let runtime = EffectRuntime::new(engine, &wasm_path, &config, cloner.clone())
+        let runtime = EffectRuntime::new(engine, &wasm_path, &config, cloner.clone(), cache_dir, &config.mount)
             .map_err(|e| RegistryError::RuntimeError(e.to_string()))?;
 
         Ok((config.mount.clone(), is_root, runtime))

@@ -11,6 +11,8 @@ pub mod git;
 
 use crate::Provider;
 use crate::auth::AuthManager;
+use crate::cache::l2::BrowseCacheL2;
+use crate::cache::{CacheRecord, RecordKind};
 use crate::config::InstanceConfig;
 use crate::config::schema::{self, SchemaField};
 use crate::omnifs::provider::types as wit_types;
@@ -35,6 +37,7 @@ pub struct EffectRuntime {
     http: HttpExecutor,
     kv: MemoryKvExecutor,
     git: git::GitExecutor,
+    l2: Option<BrowseCacheL2>,
 }
 
 struct HostState {
@@ -86,6 +89,8 @@ impl EffectRuntime {
         wasm_path: &Path,
         config: &InstanceConfig,
         cloner: Arc<GitCloner>,
+        cache_dir: &Path,
+        mount_name: &str,
     ) -> Result<Self, RuntimeError> {
         let mut linker = wasmtime::component::Linker::<HostState>::new(engine);
 
@@ -128,6 +133,17 @@ impl EffectRuntime {
 
         let git = git::GitExecutor::new(cloner, capability.clone());
 
+        let l2 = {
+            let db_path = cache_dir.join("providers").join(mount_name).join("browse.redb");
+            match BrowseCacheL2::open(&db_path) {
+                Ok(cache) => Some(cache),
+                Err(e) => {
+                    tracing::warn!(mount = mount_name, error = %e, "failed to open L2 browse cache");
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             store: Mutex::new(store),
             bindings,
@@ -135,6 +151,7 @@ impl EffectRuntime {
             http: HttpExecutor::new(auth, capability),
             kv: MemoryKvExecutor::new(),
             git,
+            l2,
         })
     }
 
@@ -273,6 +290,26 @@ impl EffectRuntime {
             .omnifs_provider_browse()
             .call_close_file(&mut *store, handle)?;
         Ok(())
+    }
+
+    pub fn cache_get(&self, path: &str, kind: RecordKind) -> Option<CacheRecord> {
+        self.l2.as_ref()?.get(path, kind).ok().flatten()
+    }
+
+    pub fn cache_put(&self, path: &str, kind: RecordKind, record: &CacheRecord) {
+        if let Some(ref l2) = self.l2 {
+            if let Err(e) = l2.put(path, kind, record) {
+                tracing::debug!(path, error = %e, "L2 cache put failed");
+            }
+        }
+    }
+
+    pub fn cache_put_batch(&self, records: &[(String, RecordKind, CacheRecord)]) {
+        if let Some(ref l2) = self.l2 {
+            if let Err(e) = l2.put_batch(records) {
+                tracing::debug!(error = %e, "L2 cache batch put failed");
+            }
+        }
     }
 
     pub async fn call_timer_tick(&self) -> Result<wit_types::ActionResult, RuntimeError> {
