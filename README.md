@@ -2,35 +2,63 @@
 
 *the universe, mounted on your filesystem.*
 
-Plan 9 was right, just 40 years early. Everything is a file: that's the Unix philosophy at its purest. omnifs takes that idea seriously and projects the entire world (starting with GitHub) into a filesystem you can `cd`, `ls`, `cat`, `grep`, and `tail`.
+omnifs projects the entire world into your local filesystem. GitHub repos, Hugging Face models, Kubernetes clusters, Slack channels, arXiv papers: each service mounts as a Wasm plugin you can `cd`, `ls`, `cat`, and `grep`. No SDKs. No pagination. No auth dances. Just paths.
 
-No SDKs. No pagination. No auth dances. Just files.
+Plan 9 was right, just 40 years early. Everything is a file. The world moved to APIs; omnifs moves it back to paths, for humans and agents alike.
 
-## What it looks like
+## Quickstart
+
+### Prerequisites
+
+- Docker and Docker Compose
+- SSH agent running with a GitHub key loaded
+- `gh` CLI (for generating a token)
+
+### Launch
 
 ```bash
-$ cd ~/omnifs/github
-$ ls
-raulk/  torvalds/  rust-lang/
+git clone https://github.com/raulk/omnifs
+cd omnifs
 
-$ cd raulk/omnifs
-$ ls
-issues/  pulls/  actions/  src/
+mkdir -p .secrets
+gh auth token > .secrets/github_token
 
-$ cat issues/1/title.txt
-Add Linear provider
-
-$ grep -r "bug" issues/
-issues/3/labels.txt:bug
-issues/7/labels.txt:bug,priority:high
-
-$ tail -f actions/runs/latest/steps/2/log
-Running cargo test...
-test runtime::tests::test_effect_loop ... ok
-test config::tests::test_parse_provider ... ok
+docker compose up --build -d
+docker compose exec omnifs /bin/zsh
 ```
 
-That's it. You browse repos like directories. Issues are folders with `title.txt`, `body.md`, `labels.txt`. PRs expose `diff.patch`. CI logs stream like any other file. Use the tools you already know.
+### Explore
+
+```bash
+cd /github/torvalds
+ls
+
+cd /github/ollama/ollama
+ls
+
+cd /github/ollama/ollama/_repo
+ls
+
+cd /github/ollama/_issues/_open
+ls
+```
+
+Use `docker compose logs omnifs` to inspect logs and `docker compose down` to stop the container.
+
+<details>
+<summary>SSH agent troubleshooting</summary>
+
+omnifs clones repos over SSH inside the container using your forwarded agent socket. This does not copy your private key into the container, but it does let the container ask your agent to sign while the socket is mounted.
+
+Verify your setup:
+
+```bash
+echo "$SSH_AUTH_SOCK"
+ssh-add -L
+ssh -T git@github.com
+```
+
+</details>
 
 ## For agents
 
@@ -40,84 +68,29 @@ Agents should not have to deal with APIs. If you can read a file, you can read t
 
 omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The architecture has three layers:
 
+```
+                                                                   ┌────────────────┐
+┌──────────────┐          ┌────────────────────────────┐           │ github.wasm    ├──▶ GitHub
+│  your shell  │   FUSE   │         omnifs host         │  effects  │ linear.wasm    ├──▶ Linear
+│  or agent    │ ◀──────▶ │  /github  /linear  /arxiv   │ ◀──────▶ │ arxiv.wasm     ├──▶ arXiv
+└──────────────┘   files  └────────────────────────────┘           │ ...            │
+                                                                   └────────────────┘
+```
+
 **Wasm providers** are plugins compiled to WebAssembly components. Each provider projects a domain (GitHub, Linear, S3, whatever) into the filesystem namespace. Drop a `.wasm` into `~/.omnifs/plugins/` and it mounts.
 
 **Effect-based runtime** means providers never touch the network or Git directly. They describe what they need ("fetch this API endpoint", "clone this repo"), and the host executes. This keeps providers sandboxed and lets the host manage caching, rate limits, and concurrency.
 
 **Git-backed reconciliation** means writes work through Git. Edit files in a transaction directory, then rename it to `commit/` to execute. The provider translates that into API calls. Everything stays auditable, revertible, and familiar.
 
-## Getting started
-
-Build from source:
-
-```bash
-git clone https://github.com/raulk/omnifs
-cd omnifs
-cargo build --release
-```
-
-Build the GitHub provider (requires the `wasm32-wasip1` target):
-
-```bash
-rustup target add wasm32-wasip1
-just build-providers
-mkdir -p ~/.omnifs/plugins
-cp target/wasm32-wasip1/release/omnifs_provider_github.wasm ~/.omnifs/plugins/
-```
-
-Configure the provider at `~/.omnifs/providers/github.toml`:
-
-```toml
-plugin = "github_provider.wasm"
-mount = "github"
-root_mount = true
-
-[auth]
-type = "bearer-token"
-token_env = "GITHUB_TOKEN"
-
-[capabilities]
-domains = ["api.github.com"]
-git_repos = ["git@github.com:*"]
-max_memory_mb = 256
-```
-
-Mount it:
-
-```bash
-export GITHUB_TOKEN="$(gh auth token)"
-mkdir -p ~/omnifs
-./target/release/omnifs mount --mount-point ~/omnifs
-```
-
-Or use the container workflow:
-
-```bash
-just start   # build image and start container with omnifs mounted at /github
-just shell   # interactive shell inside
-just logs    # view runtime log
-just stop    # tear down
-```
-
-Or with Docker Compose:
-
-```bash
-export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
-docker compose up --build -d
-docker compose exec omnifs /bin/zsh
-docker compose logs omnifs
-docker compose down
-```
-
 ## Status
 
-Pre-release v0.1.0. This is a proof of concept that focuses on the container workflow on Linux.
+Early release (v0.1.0). Read-only GitHub projection works end-to-end in a Linux container. Write-back and additional providers are next.
 
-What works:
-- GitHub read-only projection (repos, issues, PRs, actions, releases)
-- Blobless partial clone for repository contents
-- Wasm provider sandboxing with effect-based runtime
-- LRU caching for API responses
+- Browse any GitHub repo's tree without cloning it locally
+- Read issues, PRs, CI runs, and diffs as plain files
+- Extend with new providers by dropping a `.wasm` plugin into `~/.omnifs/plugins/`
+- Responses cached with LRU eviction; no redundant API calls
 
 ## What's coming
 
