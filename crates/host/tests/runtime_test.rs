@@ -70,10 +70,10 @@ async fn test_list_root() {
     let rt = make_runtime(&engine);
     let result = rt.call_list_entries("").await.unwrap();
     match result {
-        ActionResult::DirEntries(entries) => {
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].name, "hello");
-            assert!(matches!(entries[0].kind, EntryKind::Directory));
+        ActionResult::DirEntries(listing) => {
+            assert_eq!(listing.entries.len(), 1);
+            assert_eq!(listing.entries[0].name, "hello");
+            assert!(matches!(listing.entries[0].kind, EntryKind::Directory));
         }
         other => panic!("expected DirEntries, got {other:?}"),
     }
@@ -85,9 +85,9 @@ async fn test_list_hello_dir() {
     let rt = make_runtime(&engine);
     let result = rt.call_list_entries("hello").await.unwrap();
     match result {
-        ActionResult::DirEntries(entries) => {
-            assert_eq!(entries.len(), 2);
-            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        ActionResult::DirEntries(listing) => {
+            assert_eq!(listing.entries.len(), 2);
+            let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"message"));
             assert!(names.contains(&"greeting"));
         }

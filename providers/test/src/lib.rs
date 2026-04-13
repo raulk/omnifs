@@ -87,26 +87,32 @@ impl exports::omnifs::provider::browse::Guest for TestProvider {
     fn list_entries(_id: u64, path: String) -> omnifs::provider::types::ProviderResponse {
         use omnifs::provider::types::*;
         match path.as_str() {
-            "" => ProviderResponse::Done(ActionResult::DirEntries(vec![DirEntry {
-                name: "hello".to_string(),
-                kind: EntryKind::Directory,
-                size: None,
-                projected_files: None,
-            }])),
-            "hello" => ProviderResponse::Done(ActionResult::DirEntries(vec![
-                DirEntry {
-                    name: "message".to_string(),
-                    kind: EntryKind::File,
-                    size: Some(13),
+            "" => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![DirEntry {
+                    name: "hello".to_string(),
+                    kind: EntryKind::Directory,
+                    size: None,
                     projected_files: None,
-                },
-                DirEntry {
-                    name: "greeting".to_string(),
-                    kind: EntryKind::File,
-                    size: Some(12),
-                    projected_files: None,
-                },
-            ])),
+                }],
+                exhaustive: true,
+            })),
+            "hello" => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![
+                    DirEntry {
+                        name: "message".to_string(),
+                        kind: EntryKind::File,
+                        size: Some(13),
+                        projected_files: None,
+                    },
+                    DirEntry {
+                        name: "greeting".to_string(),
+                        kind: EntryKind::File,
+                        size: Some(12),
+                        projected_files: None,
+                    },
+                ],
+                exhaustive: true,
+            })),
             _ => ProviderResponse::Done(ActionResult::Err("not found".to_string())),
         }
     }

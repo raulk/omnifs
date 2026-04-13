@@ -186,7 +186,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
             })
             .unwrap_or(false);
             if is_negative {
-                return ProviderResponse::Done(ActionResult::DirEntries(vec![]));
+                return ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries: vec![], exhaustive: true }));
             }
             // Return from repo list cache if fresh.
             let cached = super::with_state(|state| {
@@ -200,7 +200,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
             })
             .unwrap_or(None);
             if let Some(repos) = cached {
-                let entries = repos
+                let entries: Vec<DirEntry> = repos
                     .into_iter()
                     .map(|name| DirEntry {
                         name,
@@ -209,7 +209,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                         projected_files: None,
                     })
                     .collect();
-                return ProviderResponse::Done(ActionResult::DirEntries(entries));
+                return ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }));
             }
             // Fetch owner profile to determine kind and repo count.
             let known_kind = super::with_state(|state| {
@@ -233,32 +233,35 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
         // Repo level: fixed namespace dirs
         FsPath::Repo { owner, repo } => {
             touch_repo(owner, repo);
-            ProviderResponse::Done(ActionResult::DirEntries(vec![
-                DirEntry {
-                    name: "_repo".to_string(),
-                    kind: EntryKind::Directory,
-                    size: None,
-                    projected_files: None,
-                },
-                DirEntry {
-                    name: "_issues".to_string(),
-                    kind: EntryKind::Directory,
-                    size: None,
-                    projected_files: None,
-                },
-                DirEntry {
-                    name: "_prs".to_string(),
-                    kind: EntryKind::Directory,
-                    size: None,
-                    projected_files: None,
-                },
-                DirEntry {
-                    name: "_actions".to_string(),
-                    kind: EntryKind::Directory,
-                    size: None,
-                    projected_files: None,
-                },
-            ]))
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![
+                    DirEntry {
+                        name: "_repo".to_string(),
+                        kind: EntryKind::Directory,
+                        size: None,
+                        projected_files: None,
+                    },
+                    DirEntry {
+                        name: "_issues".to_string(),
+                        kind: EntryKind::Directory,
+                        size: None,
+                        projected_files: None,
+                    },
+                    DirEntry {
+                        name: "_prs".to_string(),
+                        kind: EntryKind::Directory,
+                        size: None,
+                        projected_files: None,
+                    },
+                    DirEntry {
+                        name: "_actions".to_string(),
+                        kind: EntryKind::Directory,
+                        size: None,
+                        projected_files: None,
+                    },
+                ],
+                exhaustive: true,
+            }))
         }
 
         // Namespace level: list appropriate subdirs
@@ -266,28 +269,34 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
             touch_repo(owner, repo);
             match ns {
                 Namespace::Issues | Namespace::Prs => {
-                    ProviderResponse::Done(ActionResult::DirEntries(vec![
-                        DirEntry {
-                            name: "_open".to_string(),
-                            kind: EntryKind::Directory,
-                            size: None,
-                            projected_files: None,
-                        },
-                        DirEntry {
-                            name: "_all".to_string(),
-                            kind: EntryKind::Directory,
-                            size: None,
-                            projected_files: None,
-                        },
-                    ]))
+                    ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                        entries: vec![
+                            DirEntry {
+                                name: "_open".to_string(),
+                                kind: EntryKind::Directory,
+                                size: None,
+                                projected_files: None,
+                            },
+                            DirEntry {
+                                name: "_all".to_string(),
+                                kind: EntryKind::Directory,
+                                size: None,
+                                projected_files: None,
+                            },
+                        ],
+                        exhaustive: true,
+                    }))
                 }
                 Namespace::Actions => {
-                    ProviderResponse::Done(ActionResult::DirEntries(vec![DirEntry {
-                        name: "runs".to_string(),
-                        kind: EntryKind::Directory,
-                        size: None,
-                        projected_files: None,
-                    }]))
+                    ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                        entries: vec![DirEntry {
+                            name: "runs".to_string(),
+                            kind: EntryKind::Directory,
+                            size: None,
+                            projected_files: None,
+                        }],
+                        exhaustive: true,
+                    }))
                 }
                 Namespace::Repo => {
                     let clone_url = format!("git@github.com:{owner}/{repo}.git");
@@ -374,7 +383,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                     projected_files: None,
                 });
             }
-            ProviderResponse::Done(ActionResult::DirEntries(files))
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries: files, exhaustive: true }))
         }
 
         // Comments level: list or fetch comments
@@ -392,7 +401,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                 return super::list_cached_comments(&data);
             }
             if cache_only() {
-                return ProviderResponse::Done(ActionResult::DirEntries(vec![]));
+                return ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries: vec![], exhaustive: false }));
             }
             let api_path = format!("/repos/{owner}/{repo}/issues/{number}/comments?per_page=100");
             dispatch(
@@ -438,26 +447,29 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
         }
 
         // Action run level: list run files
-        FsPath::ActionRun { .. } => ProviderResponse::Done(ActionResult::DirEntries(vec![
-            DirEntry {
-                name: "status".to_string(),
-                kind: EntryKind::File,
-                size: Some(4096),
-                projected_files: None,
-            },
-            DirEntry {
-                name: "conclusion".to_string(),
-                kind: EntryKind::File,
-                size: Some(4096),
-                projected_files: None,
-            },
-            DirEntry {
-                name: "log".to_string(),
-                kind: EntryKind::File,
-                size: Some(4096),
-                projected_files: None,
-            },
-        ])),
+        FsPath::ActionRun { .. } => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+            entries: vec![
+                DirEntry {
+                    name: "status".to_string(),
+                    kind: EntryKind::File,
+                    size: Some(4096),
+                    projected_files: None,
+                },
+                DirEntry {
+                    name: "conclusion".to_string(),
+                    kind: EntryKind::File,
+                    size: Some(4096),
+                    projected_files: None,
+                },
+                DirEntry {
+                    name: "log".to_string(),
+                    kind: EntryKind::File,
+                    size: Some(4096),
+                    projected_files: None,
+                },
+            ],
+            exhaustive: true,
+        })),
 
         // All other paths: not listable
         _ => err("not found"),

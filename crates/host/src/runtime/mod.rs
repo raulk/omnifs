@@ -16,6 +16,7 @@ use crate::cache::{CacheRecord, RecordKind};
 use crate::config::InstanceConfig;
 use crate::config::schema::{self, SchemaField};
 use crate::omnifs::provider::types as wit_types;
+use crate::omnifs::provider::types::DirListing;
 use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
 use crate::runtime::cloner::GitCloner;
 use crate::runtime::correlation::CorrelationTracker;
@@ -232,8 +233,8 @@ impl EffectRuntime {
         let result = self.drive_effects(id, response).await?;
 
         // Intercept DirEntries to extract and cache projected files.
-        if let wit_types::ActionResult::DirEntries(ref entries) = result {
-            self.extract_projected_files(path, entries);
+        if let wit_types::ActionResult::DirEntries(ref listing) = result {
+            self.extract_projected_files(path, &listing.entries, listing.exhaustive);
         }
 
         // Strip projected_files before returning to FUSE.
@@ -341,7 +342,7 @@ impl EffectRuntime {
     }
 
     /// Extract projected files from DirEntries and batch-write to L2.
-    fn extract_projected_files(&self, parent_path: &str, entries: &[wit_types::DirEntry]) {
+    fn extract_projected_files(&self, parent_path: &str, entries: &[wit_types::DirEntry], exhaustive: bool) {
         use crate::cache::{
             AttrPayload, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache, LookupPayload,
             RecordKind, ttl,
@@ -363,6 +364,7 @@ impl EffectRuntime {
             .collect();
         let dirents_payload = DirentsPayload {
             entries: dirent_records,
+            exhaustive,
         };
         batch.push((
             parent_path.to_string(),
@@ -459,15 +461,16 @@ impl EffectRuntime {
 
     /// Strip projected_files from DirEntries before handing to FUSE.
     fn strip_projected_files(&self, result: wit_types::ActionResult) -> wit_types::ActionResult {
-        if let wit_types::ActionResult::DirEntries(entries) = result {
-            let stripped: Vec<wit_types::DirEntry> = entries
+        if let wit_types::ActionResult::DirEntries(listing) = result {
+            let stripped: Vec<wit_types::DirEntry> = listing
+                .entries
                 .into_iter()
                 .map(|mut e| {
                     e.projected_files = None;
                     e
                 })
                 .collect();
-            wit_types::ActionResult::DirEntries(stripped)
+            wit_types::ActionResult::DirEntries(DirListing { entries: stripped, exhaustive: listing.exhaustive })
         } else {
             result
         }

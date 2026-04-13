@@ -86,6 +86,7 @@ fn dirents_payload_round_trip() {
                 size: 0,
             },
         ],
+        exhaustive: true,
     };
     let bytes = payload.serialize();
     let decoded = DirentsPayload::deserialize(&bytes).unwrap();

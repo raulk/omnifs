@@ -178,6 +178,10 @@ pub struct DirentRecord {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirentsPayload {
     pub entries: Vec<DirentRecord>,
+    /// Whether the listing is exhaustive (every child is present).
+    /// When true, the host may return ENOENT for absent names
+    /// without consulting the provider.
+    pub exhaustive: bool,
 }
 
 impl DirentsPayload {

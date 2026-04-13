@@ -8,7 +8,7 @@ pub(crate) mod inode;
 
 use crate::cache::l0::{BrowseCacheL0, L0Key};
 use crate::cache::{CacheRecord, RecordKind};
-use crate::omnifs::provider::types::{ActionResult, EntryKind};
+use crate::omnifs::provider::types::{ActionResult, DirListing, EntryKind};
 use crate::registry::ProviderRegistry;
 use crate::runtime::EffectRuntime;
 use dashmap::DashMap;
@@ -282,10 +282,19 @@ impl Filesystem for FuseFs {
 
         // --- L0/L2 cache path (only for provider-delegated lookups) ---
 
-        // Dirents-implied negative: if parent dirents are cached and child is absent, ENOENT.
+        // Dirents-implied negative: if parent dirents are cached and
+        // exhaustive, trust the cache. Absent names don't exist.
+        //
+        // Invariant: when exhaustive is true, absence from the cached
+        // entry list is a sound negative lookup for immediate children
+        // of this directory. The provider controls this flag; the host
+        // never sets it. Without this check, filesystem probes (shells,
+        // editors, and tools like rg stat common names like .git,
+        // .gitignore, node_modules on every directory visit) would each
+        // generate a provider round-trip for names that cannot exist.
         if let Some(record) = self.l0_get(&mount, parent.0, RecordKind::Dirents, None) {
             if let Some(dirents) = crate::cache::DirentsPayload::deserialize(&record.payload) {
-                if !dirents.entries.iter().any(|e| e.name == name_str) {
+                if dirents.exhaustive && !dirents.entries.iter().any(|e| e.name == name_str) {
                     reply.error(Errno::ENOENT);
                     return;
                 }
@@ -623,6 +632,11 @@ impl Filesystem for FuseFs {
 
         self.drain_and_evict_l0(&mount);
 
+        let Some(runtime) = self.runtime_for_mount(&mount) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+
         tracing::debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount.as_str(), "cache miss");
 
         match self.rt.block_on(runtime.call_list_entries(&path)) {
@@ -674,10 +688,11 @@ impl Filesystem for FuseFs {
                     reply.error(Errno::EIO);
                 }
             }
-            Ok(ActionResult::DirEntries(dir_entries)) => {
+            Ok(ActionResult::DirEntries(listing)) => {
+                let dir_entries = &listing.entries;
                 let mut snapshot = Vec::with_capacity(dir_entries.len());
                 let mut dirent_records = Vec::with_capacity(dir_entries.len());
-                for e in &dir_entries {
+                for e in dir_entries {
                     let child_path = if path.is_empty() {
                         e.name.clone()
                     } else {
