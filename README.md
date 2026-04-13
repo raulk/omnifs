@@ -109,11 +109,34 @@ What works:
 - Wasm provider sandboxing with effect-based runtime
 - LRU caching for API responses
 
-What's coming:
+## What's coming
+
+### Core omnifs
 - Write-back via git push (mutations through staging transactions)
-- More providers (Linear, S3, cloud APIs)
-- macOS and Windows support
+- Better caching (hot-path memoization, negative caching, smarter invalidation)
+- Background indexing for large trees and expensive projections
+- Search across projected content, metadata, and repo history
+- Tracing and observability for provider calls, cache behavior, and FUSE latency
+- Better prefetching and pagination strategies for large orgs and repos
 - Persistent inode stability across remounts
+- Offline-friendly local snapshots and replayable sync
+- Mutation workflows beyond read-only browsing
+- macOS and Windows support
+
+### Provider roadmap
+
+| Provider | What it could project |
+| --- | --- |
+| GitHub | Commits, branches, reviews, checks, releases, and discussion state |
+| Hugging Face | Models, datasets, spaces, cards, files, versions, and download metadata as browsable trees |
+| arXiv | Papers by category, author, and query, with abstracts, source, PDFs, references, and update feeds |
+| Linear | Teams, projects, issues, cycles, comments, labels, and workflow state with draftable mutations |
+| DNS | Zones, records, history, propagation state, and provider-backed change transactions |
+| S3 and object stores | Buckets, prefixes, object metadata, versions, lifecycle rules, and event streams |
+| OCI registries | Images, tags, manifests, layers, SBOMs, and signature material as mountable content |
+| Kubernetes | Clusters, namespaces, workloads, logs, events, and live resource views |
+| Postgres and SQLite | Schemas, tables, rows, views, and queryable virtual files for inspection and export |
+| Slack and Discord | Channels, threads, message history, attachments, and searchable conversation snapshots |
 
 ## License
 
