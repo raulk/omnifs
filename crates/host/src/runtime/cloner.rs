@@ -1,7 +1,9 @@
 //! Git repository cloning with coalescing and timeout.
 //!
-//! `GitCloner` manages blobless clones of git repositories with
+//! `GitCloner` manages shallow clones of git repositories with
 //! locking to prevent concurrent clones of the same repo.
+//! Uses --depth=1 --single-branch --no-tags for fast first access;
+//! the FUSE passthrough only reads the HEAD working tree.
 
 use dashmap::DashMap;
 use std::io::Read as _;
@@ -115,7 +117,7 @@ impl GitCloner {
         }
 
         let mut child = Command::new("git")
-            .args(["clone", "--filter=blob:none", url])
+            .args(["clone", "--depth=1", "--single-branch", "--no-tags", url])
             .arg(dest)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
