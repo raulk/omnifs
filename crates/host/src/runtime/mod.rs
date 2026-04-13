@@ -452,6 +452,7 @@ impl EffectRuntime {
         }
 
         if !batch.is_empty() {
+            tracing::debug!(target: "omnifs_cache", kind = "prematerialize", count = batch.len(), "projected files extracted to L2");
             self.cache_put_batch(&batch);
         }
     }

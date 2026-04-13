@@ -302,10 +302,12 @@ impl Filesystem for FuseFs {
             if let Some(lookup) = crate::cache::LookupPayload::deserialize(&record.payload) {
                 match lookup {
                     crate::cache::LookupPayload::Negative => {
+                        tracing::debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount.as_str(), "negative cache hit");
                         reply.error(Errno::ENOENT);
                         return;
                     }
                     crate::cache::LookupPayload::Positive { kind, size } => {
+                        tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "lookup", mount = mount.as_str(), "cache hit");
                         let ek = entry_kind_from_cache(kind);
                         let ino = self.get_or_alloc_ino(&mount, &child_path, ek, size);
                         let attr = match ek {
@@ -340,10 +342,12 @@ impl Filesystem for FuseFs {
                 );
                 match lookup {
                     crate::cache::LookupPayload::Negative => {
+                        tracing::debug!(target: "omnifs_cache", kind = "negative_hit", op = "lookup", mount = mount.as_str(), "negative cache hit");
                         reply.error(Errno::ENOENT);
                         return;
                     }
                     crate::cache::LookupPayload::Positive { kind, size } => {
+                        tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "lookup", mount = mount.as_str(), "cache hit");
                         let ek = entry_kind_from_cache(kind);
                         let ino = self.get_or_alloc_ino(&mount, &child_path, ek, size);
                         let attr = match ek {
@@ -372,6 +376,8 @@ impl Filesystem for FuseFs {
                 return;
             }
         }
+
+        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "lookup", mount = mount.as_str(), "cache miss");
 
         match self
             .rt
@@ -568,6 +574,7 @@ impl Filesystem for FuseFs {
         // L0: check cached dirents by inode
         if let Some(record) = self.l0_get(&mount, ino.0, RecordKind::Dirents, None) {
             if let Some(dirents) = crate::cache::DirentsPayload::deserialize(&record.payload) {
+                tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "opendir", mount = mount.as_str(), "cache hit");
                 let mut snapshot = Vec::with_capacity(dirents.entries.len());
                 for e in &dirents.entries {
                     let child_path = if path.is_empty() {
@@ -589,6 +596,7 @@ impl Filesystem for FuseFs {
         if let Some(runtime) = self.runtime_for_mount(&mount) {
             if let Some(record) = runtime.cache_get(&path, RecordKind::Dirents) {
                 if let Some(dirents) = crate::cache::DirentsPayload::deserialize(&record.payload) {
+                    tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "opendir", mount = mount.as_str(), "cache hit");
                     // Promote to L0
                     self.l0_put(&mount, ino.0, RecordKind::Dirents, None, record.clone());
 
@@ -614,6 +622,8 @@ impl Filesystem for FuseFs {
         }
 
         self.drain_and_evict_l0(&mount);
+
+        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "opendir", mount = mount.as_str(), "cache miss");
 
         match self.rt.block_on(runtime.call_list_entries(&path)) {
             Ok(ActionResult::DisownedTree(tree_ref)) => {
@@ -786,6 +796,7 @@ impl Filesystem for FuseFs {
 
         // L0: check cached file by inode
         if let Some(record) = self.l0_get(&mount, ino.0, RecordKind::File, None) {
+            tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = mount.as_str(), "cache hit");
             let data = &record.payload;
             let start = offset as usize;
             let end = (start + size as usize).min(data.len());
@@ -802,6 +813,7 @@ impl Filesystem for FuseFs {
         if real.is_none() {
             if let Some(runtime) = self.runtime_for_mount(&mount) {
                 if let Some(record) = runtime.cache_get(&path, RecordKind::File) {
+                    tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = mount.as_str(), "cache hit");
                     let data = record.payload.clone();
                     // Promote to L0
                     self.l0_put(&mount, ino.0, RecordKind::File, None, record.clone());
@@ -844,6 +856,8 @@ impl Filesystem for FuseFs {
         };
 
         self.drain_and_evict_l0(&mount);
+
+        tracing::debug!(target: "omnifs_cache", kind = "miss", op = "read", mount = mount.as_str(), "cache miss");
 
         match self.rt.block_on(runtime.call_read_file(&path)) {
             Ok(ActionResult::FileContent(data)) => {
