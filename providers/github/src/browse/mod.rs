@@ -139,22 +139,46 @@ pub(crate) fn extract_http_body(result: &SingleEffectResult) -> Result<&[u8], Pr
 /// Track X-RateLimit-Remaining from GitHub API responses. Stores the
 /// value in `ProviderState` and logs a warning via the host when low.
 pub(crate) fn check_rate_limit(resp: &HttpResponse) {
-    for header in &resp.headers {
-        if header.name.eq_ignore_ascii_case("x-ratelimit-remaining") {
-            if let Ok(remaining) = header.value.parse::<u32>() {
-                let _ = with_state(|state| {
-                    state.rate_limit_remaining = Some(remaining);
-                });
-                if remaining < 100 {
-                    crate::omnifs::provider::log::log(&LogEntry {
-                        level: LogLevel::Warn,
-                        message: format!("GitHub API rate limit low: {remaining} remaining"),
-                    });
-                }
+    let Some(remaining) = http_header_value(resp, "x-ratelimit-remaining")
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return;
+    };
+
+    let _ = with_state(|state| {
+        state.rate_limit_remaining = Some(remaining);
+    });
+
+    let limit =
+        http_header_value(resp, "x-ratelimit-limit").and_then(|value| value.parse::<u32>().ok());
+    if should_warn_rate_limit(remaining, limit) {
+        let resource = http_header_value(resp, "x-ratelimit-resource").unwrap_or("unknown");
+        let message = match limit {
+            Some(limit) => {
+                format!("GitHub API {resource} rate limit low: {remaining}/{limit} remaining")
             }
-            return;
-        }
+            None => format!("GitHub API {resource} rate limit low: {remaining} remaining"),
+        };
+        crate::omnifs::provider::log::log(&LogEntry {
+            level: LogLevel::Warn,
+            message,
+        });
     }
+}
+
+fn http_header_value<'a>(resp: &'a HttpResponse, name: &str) -> Option<&'a str> {
+    resp.headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(name))
+        .map(|header| header.value.as_str())
+}
+
+fn should_warn_rate_limit(remaining: u32, limit: Option<u32>) -> bool {
+    remaining <= rate_limit_warning_threshold(limit)
+}
+
+fn rate_limit_warning_threshold(limit: Option<u32>) -> u32 {
+    limit.map_or(99, |limit| (limit / 10).clamp(1, 100))
 }
 
 pub(crate) fn truncate_content(mut data: Vec<u8>) -> Vec<u8> {
@@ -171,6 +195,7 @@ pub(crate) fn dir_entry(name: &str) -> ProviderResponse {
         name: name.to_string(),
         kind: EntryKind::Directory,
         size: None,
+        projected_files: None,
     })))
 }
 
@@ -179,6 +204,7 @@ pub(crate) fn file_entry(name: &str) -> ProviderResponse {
         name: name.to_string(),
         kind: EntryKind::File,
         size: Some(4096),
+        projected_files: None,
     })))
 }
 

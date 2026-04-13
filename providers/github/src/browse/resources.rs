@@ -38,6 +38,7 @@ pub fn resume_cached_repos(
                     name,
                     kind: EntryKind::Directory,
                     size: None,
+                    projected_files: None,
                 })
                 .collect();
             entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -54,6 +55,7 @@ pub fn resume_cached_repos(
                         name: repo_name.to_string(),
                         kind: EntryKind::Directory,
                         size: None,
+                        projected_files: None,
                     })
                 })
                 .collect();
@@ -238,6 +240,7 @@ pub fn resume_repo_pages(
             name,
             kind: EntryKind::Directory,
             size: None,
+            projected_files: None,
         })
         .collect();
     ProviderResponse::Done(ActionResult::DirEntries(entries))
@@ -334,6 +337,7 @@ pub fn resume_list_first_page(
                         name: name.to_string(),
                         kind: EntryKind::Directory,
                         size: None,
+                        projected_files: None,
                     })
                 })
                 .collect();
@@ -402,6 +406,7 @@ pub fn resume_list_first_page(
                         name: run_id.to_string(),
                         kind: EntryKind::Directory,
                         size: None,
+                        projected_files: None,
                     })
                 })
                 .collect();
@@ -459,6 +464,7 @@ pub fn finalize_search_results(path: &str, items: &[serde_json::Value]) -> Provi
                 name: number.to_string(),
                 kind: EntryKind::Directory,
                 size: None,
+                projected_files: None,
             })
         })
         .collect();
@@ -504,6 +510,7 @@ pub fn finalize_cached_resource_list(
             name: number.to_string(),
             kind: EntryKind::Directory,
             size: None,
+            projected_files: None,
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -526,6 +533,7 @@ pub fn finalize_cached_runs_list(owner: &str, repo: &str) -> ProviderResponse {
             name: run_id.to_string(),
             kind: EntryKind::Directory,
             size: None,
+            projected_files: None,
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));

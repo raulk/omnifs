@@ -206,6 +206,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                         name,
                         kind: EntryKind::Directory,
                         size: None,
+                        projected_files: None,
                     })
                     .collect();
                 return ProviderResponse::Done(ActionResult::DirEntries(entries));
@@ -237,21 +238,25 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                     name: "_repo".to_string(),
                     kind: EntryKind::Directory,
                     size: None,
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "_issues".to_string(),
                     kind: EntryKind::Directory,
                     size: None,
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "_prs".to_string(),
                     kind: EntryKind::Directory,
                     size: None,
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "_actions".to_string(),
                     kind: EntryKind::Directory,
                     size: None,
+                    projected_files: None,
                 },
             ]))
         }
@@ -266,11 +271,13 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                             name: "_open".to_string(),
                             kind: EntryKind::Directory,
                             size: None,
+                            projected_files: None,
                         },
                         DirEntry {
                             name: "_all".to_string(),
                             kind: EntryKind::Directory,
                             size: None,
+                            projected_files: None,
                         },
                     ]))
                 }
@@ -279,6 +286,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                         name: "runs".to_string(),
                         kind: EntryKind::Directory,
                         size: None,
+                        projected_files: None,
                     }]))
                 }
                 Namespace::Repo => {
@@ -331,26 +339,31 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                     name: "title".to_string(),
                     kind: EntryKind::File,
                     size: Some(4096),
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "body".to_string(),
                     kind: EntryKind::File,
                     size: Some(4096),
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "state".to_string(),
                     kind: EntryKind::File,
                     size: Some(4096),
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "user".to_string(),
                     kind: EntryKind::File,
                     size: Some(4096),
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "comments".to_string(),
                     kind: EntryKind::Directory,
                     size: None,
+                    projected_files: None,
                 },
             ];
             if kind == ResourceKind::Prs {
@@ -358,6 +371,7 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                     name: "diff".to_string(),
                     kind: EntryKind::File,
                     size: Some(4096),
+                    projected_files: None,
                 });
             }
             ProviderResponse::Done(ActionResult::DirEntries(files))
@@ -429,16 +443,19 @@ pub fn list_entries(id: u64, path: &str) -> ProviderResponse {
                 name: "status".to_string(),
                 kind: EntryKind::File,
                 size: Some(4096),
+                projected_files: None,
             },
             DirEntry {
                 name: "conclusion".to_string(),
                 kind: EntryKind::File,
                 size: Some(4096),
+                projected_files: None,
             },
             DirEntry {
                 name: "log".to_string(),
                 kind: EntryKind::File,
                 size: Some(4096),
+                projected_files: None,
             },
         ])),
 

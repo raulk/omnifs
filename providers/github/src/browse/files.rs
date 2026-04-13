@@ -264,6 +264,7 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
                     name: i.to_string(),
                     kind: EntryKind::File,
                     size: Some(4096),
+                    projected_files: None,
                 })
                 .collect();
             ProviderResponse::Done(ActionResult::DirEntries(entries))
@@ -318,6 +319,7 @@ pub fn list_cached_comments(body: &[u8]) -> ProviderResponse {
             name: i.to_string(),
             kind: EntryKind::File,
             size: Some(4096),
+            projected_files: None,
         })
         .collect();
     ProviderResponse::Done(ActionResult::DirEntries(entries))

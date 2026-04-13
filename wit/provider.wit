@@ -1,4 +1,4 @@
-package omnifs:provider@0.1.0;
+package omnifs:provider@0.2.0;
 
 // === Shared types ===
 
@@ -29,6 +29,7 @@ interface types {
         kv-set(kv-set-request),
         kv-delete(string),
         kv-list-keys(string),
+        cache-invalidate-prefix(cache-invalidate-request),
     }
 
     variant provider-response {
@@ -55,6 +56,7 @@ interface types {
         kv-value(option<list<u8>>),
         kv-ok,
         kv-keys(list<string>),
+        cache-ok,
         effect-error(effect-error),
     }
 
@@ -178,6 +180,10 @@ interface types {
         value: list<u8>,
     }
 
+    record cache-invalidate-request {
+        prefix: string,
+    }
+
     record log-entry {
         level: log-level,
         message: string,
@@ -195,6 +201,12 @@ interface types {
         name: string,
         kind: entry-kind,
         size: option<u64>,
+        projected-files: option<list<projected-file>>,
+    }
+
+    record projected-file {
+        name: string,
+        content: list<u8>,
     }
 
     enum entry-kind {

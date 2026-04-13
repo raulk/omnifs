@@ -54,12 +54,14 @@ impl exports::omnifs::provider::browse::Guest for TestProvider {
                 name: "hello".to_string(),
                 kind: EntryKind::Directory,
                 size: None,
+                projected_files: None,
             }))),
             "hello/message" => {
                 ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
                     name: "message".to_string(),
                     kind: EntryKind::File,
                     size: Some(13),
+                    projected_files: None,
                 })))
             }
             "hello/greeting" => {
@@ -67,6 +69,7 @@ impl exports::omnifs::provider::browse::Guest for TestProvider {
                     name: "greeting".to_string(),
                     kind: EntryKind::File,
                     size: Some(12),
+                    projected_files: None,
                 })))
             }
             "hello/cached" => {
@@ -74,6 +77,7 @@ impl exports::omnifs::provider::browse::Guest for TestProvider {
                     name: "cached".to_string(),
                     kind: EntryKind::File,
                     size: None,
+                    projected_files: None,
                 })))
             }
             _ => ProviderResponse::Done(ActionResult::DirEntryOption(None)),
@@ -87,17 +91,20 @@ impl exports::omnifs::provider::browse::Guest for TestProvider {
                 name: "hello".to_string(),
                 kind: EntryKind::Directory,
                 size: None,
+                projected_files: None,
             }])),
             "hello" => ProviderResponse::Done(ActionResult::DirEntries(vec![
                 DirEntry {
                     name: "message".to_string(),
                     kind: EntryKind::File,
                     size: Some(13),
+                    projected_files: None,
                 },
                 DirEntry {
                     name: "greeting".to_string(),
                     kind: EntryKind::File,
                     size: Some(12),
+                    projected_files: None,
                 },
             ])),
             _ => ProviderResponse::Done(ActionResult::Err("not found".to_string())),
