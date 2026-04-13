@@ -224,7 +224,15 @@ impl EffectRuntime {
                 .call_list_entries(&mut *store, id, path)?
         };
 
-        self.drive_effects(id, response).await
+        let result = self.drive_effects(id, response).await?;
+
+        // Intercept DirEntries to extract and cache projected files.
+        if let wit_types::ActionResult::DirEntries(ref entries) = result {
+            self.extract_projected_files(path, entries);
+        }
+
+        // Strip projected_files before returning to FUSE.
+        Ok(self.strip_projected_files(result))
     }
 
     pub async fn call_read_file(
@@ -309,6 +317,122 @@ impl EffectRuntime {
             if let Err(e) = l2.put_batch(records) {
                 tracing::debug!(error = %e, "L2 cache batch put failed");
             }
+        }
+    }
+
+    /// Extract projected files from DirEntries and batch-write to L2.
+    fn extract_projected_files(&self, parent_path: &str, entries: &[wit_types::DirEntry]) {
+        use crate::cache::{
+            AttrPayload, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache,
+            LookupPayload, RecordKind, ttl,
+        };
+
+        let mut batch = Vec::new();
+
+        // Cache dirents for the parent directory.
+        let dirent_records: Vec<DirentRecord> = entries
+            .iter()
+            .map(|e| DirentRecord {
+                name: e.name.clone(),
+                kind: match e.kind {
+                    wit_types::EntryKind::Directory => EntryKindCache::Directory,
+                    wit_types::EntryKind::File => EntryKindCache::File,
+                },
+                size: e.size.unwrap_or(0),
+            })
+            .collect();
+        let dirents_payload = DirentsPayload { entries: dirent_records };
+        batch.push((
+            parent_path.to_string(),
+            RecordKind::Dirents,
+            CacheRecord::new(RecordKind::Dirents, ttl::DIRENTS, dirents_payload.serialize()),
+        ));
+
+        for entry in entries {
+            let child_path = if parent_path.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{parent_path}/{}", entry.name)
+            };
+
+            let kind_cache = match entry.kind {
+                wit_types::EntryKind::Directory => EntryKindCache::Directory,
+                wit_types::EntryKind::File => EntryKindCache::File,
+            };
+            let size = entry.size.unwrap_or(0);
+
+            // Cache lookup record for child.
+            let lookup = LookupPayload::Positive { kind: kind_cache, size };
+            batch.push((
+                child_path.clone(),
+                RecordKind::Lookup,
+                CacheRecord::new(RecordKind::Lookup, ttl::LOOKUP_POSITIVE, lookup.serialize()),
+            ));
+
+            // Cache attr record for child.
+            let attr = AttrPayload { kind: kind_cache, size };
+            batch.push((
+                child_path.clone(),
+                RecordKind::Attr,
+                CacheRecord::new(RecordKind::Attr, ttl::ATTR, attr.serialize()),
+            ));
+
+            // Cache projected files.
+            if let Some(ref projected) = entry.projected_files {
+                for pf in projected {
+                    let file_path = format!("{child_path}/{}", pf.name);
+                    let file_size = pf.content.len() as u64;
+
+                    // File content record.
+                    batch.push((
+                        file_path.clone(),
+                        RecordKind::File,
+                        CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, pf.content.clone()),
+                    ));
+
+                    // Lookup record for the projected file.
+                    let pf_lookup = LookupPayload::Positive {
+                        kind: EntryKindCache::File,
+                        size: file_size,
+                    };
+                    batch.push((
+                        file_path.clone(),
+                        RecordKind::Lookup,
+                        CacheRecord::new(RecordKind::Lookup, ttl::LOOKUP_POSITIVE, pf_lookup.serialize()),
+                    ));
+
+                    // Attr record for the projected file.
+                    let pf_attr = AttrPayload {
+                        kind: EntryKindCache::File,
+                        size: file_size,
+                    };
+                    batch.push((
+                        file_path,
+                        RecordKind::Attr,
+                        CacheRecord::new(RecordKind::Attr, ttl::ATTR, pf_attr.serialize()),
+                    ));
+                }
+            }
+        }
+
+        if !batch.is_empty() {
+            self.cache_put_batch(&batch);
+        }
+    }
+
+    /// Strip projected_files from DirEntries before handing to FUSE.
+    fn strip_projected_files(&self, result: wit_types::ActionResult) -> wit_types::ActionResult {
+        if let wit_types::ActionResult::DirEntries(entries) = result {
+            let stripped: Vec<wit_types::DirEntry> = entries
+                .into_iter()
+                .map(|mut e| {
+                    e.projected_files = None;
+                    e
+                })
+                .collect();
+            wit_types::ActionResult::DirEntries(stripped)
+        } else {
+            result
         }
     }
 
