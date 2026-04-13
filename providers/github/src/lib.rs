@@ -47,6 +47,8 @@ struct ProviderState {
     cache_only: bool,
     active_repos: HashMap<String, u64>,
     event_etags: HashMap<String, String>,
+    /// Host cache invalidation prefixes collected from events, to emit on next timer tick.
+    pending_host_invalidations: Vec<String>,
 }
 
 const OWNER_REPOS_CACHE_TTL: u64 = 120;
@@ -100,6 +102,7 @@ enum Continuation {
     },
     FetchingEvents {
         repos: Vec<String>,
+        invalidation_count: usize,
     },
 }
 
@@ -138,6 +141,7 @@ impl exports::omnifs::provider::lifecycle::Guest for GithubProvider {
                 cache_only: false,
                 active_repos: HashMap::new(),
                 event_etags: HashMap::new(),
+                pending_host_invalidations: Vec::new(),
             });
         });
         let _ = with_state(|state| state.cache.advance_tick());

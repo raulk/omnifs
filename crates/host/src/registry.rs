@@ -117,8 +117,15 @@ impl ProviderRegistry {
         }
 
         let is_root = config.root_mount;
-        let runtime = EffectRuntime::new(engine, &wasm_path, &config, cloner.clone(), cache_dir, &config.mount)
-            .map_err(|e| RegistryError::RuntimeError(e.to_string()))?;
+        let runtime = EffectRuntime::new(
+            engine,
+            &wasm_path,
+            &config,
+            cloner.clone(),
+            cache_dir,
+            &config.mount,
+        )
+        .map_err(|e| RegistryError::RuntimeError(e.to_string()))?;
 
         Ok((config.mount.clone(), is_root, runtime))
     }

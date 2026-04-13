@@ -1,6 +1,6 @@
 //! L0 browse cache: in-memory, inode-keyed, byte-weighted moka cache.
 
-use crate::cache::{CacheRecord, RecordKind, L0_MAX_WEIGHT, L0_SKIP_THRESHOLD};
+use crate::cache::{CacheRecord, L0_MAX_WEIGHT, L0_SKIP_THRESHOLD, RecordKind};
 use moka::sync::Cache;
 use std::sync::Arc;
 use std::time::Duration;

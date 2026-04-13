@@ -1,7 +1,7 @@
 //! L2 browse cache: durable, path-keyed, per-provider-instance redb database.
 
-use crate::cache::{CacheRecord, RecordKind, L2_BULK_THRESHOLD};
-use redb::{Database, TableDefinition};
+use crate::cache::{CacheRecord, L2_BULK_THRESHOLD, RecordKind};
+use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
 
 const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metadata");
@@ -91,8 +91,10 @@ impl BrowseCacheL2 {
                         content.insert(key.as_str(), bytes.as_slice())?;
                         bulk.remove(key.as_str())?; // clear stale large copy
                     }
-                    _ => { meta.insert(key.as_str(), bytes.as_slice())?; }
-                };
+                    _ => {
+                        meta.insert(key.as_str(), bytes.as_slice())?;
+                    }
+                }
             }
         }
         Ok(txn.commit()?)
@@ -127,6 +129,48 @@ impl BrowseCacheL2 {
             RecordKind::File => CONTENT_TABLE,
             _ => METADATA_TABLE,
         }
+    }
+}
+
+impl BrowseCacheL2 {
+    /// Delete all records whose logical path starts with `prefix`.
+    ///
+    /// The stored key format is `{kind_char}:{path}`, so we scan each table
+    /// for keys matching `L:{prefix}`, `A:{prefix}`, `D:{prefix}`, `F:{prefix}`
+    /// using redb's ordered range iteration.
+    pub fn delete_prefix(&self, prefix: &str) -> Result<usize, redb::Error> {
+        let txn = self.db.begin_write()?;
+        let mut deleted = 0;
+        let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];
+        let kind_chars = ['L', 'A', 'D', 'F'];
+
+        for table_def in tables {
+            let mut table = txn.open_table(table_def)?;
+            let mut to_delete = Vec::new();
+            for ch in &kind_chars {
+                let scan_prefix = format!("{ch}:{prefix}");
+                // Range from scan_prefix.. to collect matching keys.
+                // redb range is inclusive-start, exclusive-end. We use the
+                // prefix incremented by one char as the upper bound.
+                let range_end = {
+                    let mut end = scan_prefix.clone();
+                    // Append a high char to create an exclusive upper bound.
+                    end.push('\u{ffff}');
+                    end
+                };
+                let range = table.range::<&str>(scan_prefix.as_str()..range_end.as_str())?;
+                for entry in range {
+                    let entry = entry?;
+                    to_delete.push(entry.0.value().to_string());
+                }
+            }
+            for key in &to_delete {
+                table.remove(key.as_str())?;
+                deleted += 1;
+            }
+        }
+        txn.commit()?;
+        Ok(deleted)
     }
 }
 

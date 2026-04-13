@@ -115,14 +115,109 @@ impl FuseFs {
         self.l0_caches.get(mount).unwrap()
     }
 
-    fn l0_get(&self, mount: &str, inode: u64, kind: RecordKind, aux: Option<String>) -> Option<std::sync::Arc<CacheRecord>> {
+    fn l0_get(
+        &self,
+        mount: &str,
+        inode: u64,
+        kind: RecordKind,
+        aux: Option<String>,
+    ) -> Option<std::sync::Arc<CacheRecord>> {
         let l0 = self.l0_for_mount(mount);
         l0.get(&L0Key::new(inode, kind, aux))
     }
 
-    fn l0_put(&self, mount: &str, inode: u64, kind: RecordKind, aux: Option<String>, record: CacheRecord) {
+    fn l0_put(
+        &self,
+        mount: &str,
+        inode: u64,
+        kind: RecordKind,
+        aux: Option<String>,
+        record: CacheRecord,
+    ) {
         let l0 = self.l0_for_mount(mount);
         l0.put(L0Key::new(inode, kind, aux), record);
+    }
+
+    /// Drain pending invalidation prefixes from the runtime and evict
+    /// matching L0 cache entries. Coarse: iterates all inodes for the mount
+    /// and evicts any whose path starts with an invalidated prefix.
+    fn drain_and_evict_l0(&self, mount: &str) {
+        let Some(runtime) = self.runtime_for_mount(mount) else {
+            return;
+        };
+        let prefixes = runtime.drain_invalidated_prefixes();
+        if prefixes.is_empty() {
+            return;
+        }
+        let Some(l0) = self.l0_caches.get(mount) else {
+            return;
+        };
+        // Collect (inode, path) pairs for this mount, then evict matches.
+        let mount_inodes: Vec<(u64, String)> = self
+            .inodes
+            .iter()
+            .filter(|entry| entry.value().mount == mount)
+            .map(|entry| (*entry.key(), entry.value().path.clone()))
+            .collect();
+
+        for (ino, path) in &mount_inodes {
+            for prefix in &prefixes {
+                if path == prefix || path.starts_with(prefix) {
+                    // Evict all record kinds for this inode (aux=None).
+                    for kind in [
+                        RecordKind::Lookup,
+                        RecordKind::Attr,
+                        RecordKind::Dirents,
+                        RecordKind::File,
+                    ] {
+                        l0.invalidate(&L0Key::new(*ino, kind, None));
+                    }
+                    // Remove from path_to_inode so lookup's early dedup
+                    // return cannot serve stale metadata.
+                    // Do NOT remove from self.inodes: live FUSE handles
+                    // (getattr, open, read) reference inodes by number and
+                    // would get ENOENT. The inode stays alive but will be
+                    // re-resolved on next lookup via the provider.
+                    self.path_to_inode
+                        .remove(&(mount.to_string(), path.clone()));
+                    break;
+                }
+            }
+        }
+
+        // Second pass: for each invalidated path, evict the *parent's*
+        // lookup(aux=child_name) entry in L0. This is the key correctness
+        // fix: lookup checks L0Key(parent_ino, Lookup, Some(child_name))
+        // before calling the provider. If "a/b" is invalidated, we must
+        // evict L0Key(ino_of_a, Lookup, Some("b")).
+        for prefix in &prefixes {
+            for pto_entry in self.path_to_inode.iter() {
+                let (ref pto_mount, ref pto_path) = *pto_entry.key();
+                if pto_mount != mount {
+                    continue;
+                }
+                // Check if this path is a child directly under the invalidated prefix.
+                if let Some(remainder) = pto_path.strip_prefix(prefix) {
+                    if !remainder.contains('/') && !remainder.is_empty() {
+                        // pto_path is a direct child. Its parent's path is prefix
+                        // (stripped of trailing slash). Find parent inode.
+                        let parent_path = prefix.trim_end_matches('/');
+                        if let Some(parent_ino_ref) = self
+                            .path_to_inode
+                            .get(&(mount.to_string(), parent_path.to_string()))
+                        {
+                            let parent_ino = *parent_ino_ref;
+                            drop(parent_ino_ref);
+                            l0.invalidate(&L0Key::new(
+                                parent_ino,
+                                RecordKind::Lookup,
+                                Some(remainder.to_string()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -198,7 +293,12 @@ impl Filesystem for FuseFs {
         }
 
         // L0: check cached lookup by parent inode + child name
-        if let Some(record) = self.l0_get(&mount, parent.0, RecordKind::Lookup, Some(name_str.to_string())) {
+        if let Some(record) = self.l0_get(
+            &mount,
+            parent.0,
+            RecordKind::Lookup,
+            Some(name_str.to_string()),
+        ) {
             if let Some(lookup) = crate::cache::LookupPayload::deserialize(&record.payload) {
                 match lookup {
                     crate::cache::LookupPayload::Negative => {
@@ -231,7 +331,13 @@ impl Filesystem for FuseFs {
         if let Some(record) = runtime.cache_get(&child_path, RecordKind::Lookup) {
             if let Some(lookup) = crate::cache::LookupPayload::deserialize(&record.payload) {
                 // Promote to L0
-                self.l0_put(&mount, parent.0, RecordKind::Lookup, Some(name_str.to_string()), record.clone());
+                self.l0_put(
+                    &mount,
+                    parent.0,
+                    RecordKind::Lookup,
+                    Some(name_str.to_string()),
+                    record.clone(),
+                );
                 match lookup {
                     crate::cache::LookupPayload::Negative => {
                         reply.error(Errno::ENOENT);
@@ -250,6 +356,8 @@ impl Filesystem for FuseFs {
                 }
             }
         }
+
+        self.drain_and_evict_l0(&mount);
 
         let child_key = (mount.clone(), child_path.clone());
         if let Some(ino_ref) = self.path_to_inode.get(&child_key) {
@@ -307,10 +415,23 @@ impl Filesystem for FuseFs {
 
                 // Write-through to L2 and L0
                 let kind_cache = cache_entry_kind(entry.kind);
-                let lookup_payload = crate::cache::LookupPayload::Positive { kind: kind_cache, size };
-                let lookup_record = CacheRecord::new(RecordKind::Lookup, crate::cache::ttl::LOOKUP_POSITIVE, lookup_payload.serialize());
+                let lookup_payload = crate::cache::LookupPayload::Positive {
+                    kind: kind_cache,
+                    size,
+                };
+                let lookup_record = CacheRecord::new(
+                    RecordKind::Lookup,
+                    crate::cache::ttl::LOOKUP_POSITIVE,
+                    lookup_payload.serialize(),
+                );
                 runtime.cache_put(&child_path, RecordKind::Lookup, &lookup_record);
-                self.l0_put(&mount, parent.0, RecordKind::Lookup, Some(name_str.to_string()), lookup_record);
+                self.l0_put(
+                    &mount,
+                    parent.0,
+                    RecordKind::Lookup,
+                    Some(name_str.to_string()),
+                    lookup_record,
+                );
 
                 let attr = match entry.kind {
                     EntryKind::Directory => self.dir_attr(ino),
@@ -327,7 +448,13 @@ impl Filesystem for FuseFs {
                     neg.serialize(),
                 );
                 runtime.cache_put(&child_path, RecordKind::Lookup, &neg_record);
-                self.l0_put(&mount, parent.0, RecordKind::Lookup, Some(name_str.to_string()), neg_record);
+                self.l0_put(
+                    &mount,
+                    parent.0,
+                    RecordKind::Lookup,
+                    Some(name_str.to_string()),
+                    neg_record,
+                );
 
                 reply.error(Errno::ENOENT);
             }
@@ -486,6 +613,8 @@ impl Filesystem for FuseFs {
             return;
         }
 
+        self.drain_and_evict_l0(&mount);
+
         match self.rt.block_on(runtime.call_list_entries(&path)) {
             Ok(ActionResult::DisownedTree(tree_ref)) => {
                 if let Some(real_root) = runtime.resolve_tree_ref(tree_ref) {
@@ -555,7 +684,9 @@ impl Filesystem for FuseFs {
                 }
 
                 // Write-through dirents to L2 + L0
-                let dirents_payload = crate::cache::DirentsPayload { entries: dirent_records };
+                let dirents_payload = crate::cache::DirentsPayload {
+                    entries: dirent_records,
+                };
                 let dirents_record = CacheRecord::new(
                     RecordKind::Dirents,
                     crate::cache::ttl::DIRENTS,
@@ -711,6 +842,8 @@ impl Filesystem for FuseFs {
             reply.error(Errno::ENOENT);
             return;
         };
+
+        self.drain_and_evict_l0(&mount);
 
         match self.rt.block_on(runtime.call_read_file(&path)) {
             Ok(ActionResult::FileContent(data)) => {

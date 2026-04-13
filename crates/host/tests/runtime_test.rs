@@ -39,7 +39,15 @@ fn make_runtime(engine: &wasmtime::Engine) -> EffectRuntime {
 
     let cloner = Arc::new(GitCloner::new(PathBuf::from("/tmp/omnifs-test-cache")));
     let cache_dir = PathBuf::from("/tmp/omnifs-test-l2");
-    EffectRuntime::new(engine, &wasm_path(), &config, cloner, &cache_dir, "test-mount").unwrap()
+    EffectRuntime::new(
+        engine,
+        &wasm_path(),
+        &config,
+        cloner,
+        &cache_dir,
+        "test-mount",
+    )
+    .unwrap()
 }
 
 #[tokio::test]

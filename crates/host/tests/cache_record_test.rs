@@ -1,6 +1,6 @@
 use omnifs_host::cache::{
-    AttrPayload, CacheRecord, DirentsPayload, DirentRecord, EntryKindCache,
-    LookupPayload, RecordKind,
+    AttrPayload, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache, LookupPayload,
+    RecordKind,
 };
 
 #[test]
@@ -45,7 +45,10 @@ fn lookup_payload_positive_round_trip() {
     let decoded = LookupPayload::deserialize(&bytes).unwrap();
     assert!(matches!(
         decoded,
-        LookupPayload::Positive { kind: EntryKindCache::File, size: 42 }
+        LookupPayload::Positive {
+            kind: EntryKindCache::File,
+            size: 42
+        }
     ));
 }
 

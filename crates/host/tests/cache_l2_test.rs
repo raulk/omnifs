@@ -7,10 +7,21 @@ fn l2_put_get_metadata() {
     let db_path = dir.path().join("browse.redb");
     let l2 = BrowseCacheL2::open(&db_path).unwrap();
 
-    let record = CacheRecord::new(RecordKind::Attr, ttl::ATTR, vec![1, 0, 0, 0, 0, 0, 0, 0, 42]);
-    l2.put("owner/repo/_issues/_open/1/title", RecordKind::Attr, &record).unwrap();
+    let record = CacheRecord::new(
+        RecordKind::Attr,
+        ttl::ATTR,
+        vec![1, 0, 0, 0, 0, 0, 0, 0, 42],
+    );
+    l2.put(
+        "owner/repo/_issues/_open/1/title",
+        RecordKind::Attr,
+        &record,
+    )
+    .unwrap();
 
-    let got = l2.get("owner/repo/_issues/_open/1/title", RecordKind::Attr).unwrap();
+    let got = l2
+        .get("owner/repo/_issues/_open/1/title", RecordKind::Attr)
+        .unwrap();
     assert!(got.is_some());
     let got = got.unwrap();
     assert_eq!(got.kind, RecordKind::Attr);
@@ -38,7 +49,11 @@ fn l2_expired_record_returns_none() {
         payload: vec![0],
     };
     l2.put("expired/path", RecordKind::Lookup, &record).unwrap();
-    assert!(l2.get("expired/path", RecordKind::Lookup).unwrap().is_none());
+    assert!(
+        l2.get("expired/path", RecordKind::Lookup)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -73,12 +88,21 @@ fn l2_put_batch() {
     let l2 = BrowseCacheL2::open(&dir.path().join("browse.redb")).unwrap();
 
     let records = vec![
-        ("a/title".to_string(), RecordKind::File,
-         CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, b"hello\n".to_vec())),
-        ("a/body".to_string(), RecordKind::File,
-         CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, b"world\n".to_vec())),
-        ("a".to_string(), RecordKind::Attr,
-         CacheRecord::new(RecordKind::Attr, ttl::ATTR, vec![0, 0, 0, 0, 0, 0, 0, 0, 0])),
+        (
+            "a/title".to_string(),
+            RecordKind::File,
+            CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, b"hello\n".to_vec()),
+        ),
+        (
+            "a/body".to_string(),
+            RecordKind::File,
+            CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, b"world\n".to_vec()),
+        ),
+        (
+            "a".to_string(),
+            RecordKind::Attr,
+            CacheRecord::new(RecordKind::Attr, ttl::ATTR, vec![0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ),
     ];
     l2.put_batch(&records).unwrap();
 

@@ -23,13 +23,13 @@ pub mod ttl {
 
 /// L0 sizing constants.
 pub const L0_MAX_WEIGHT: u64 = 32 * 1024 * 1024; // 32 MiB per provider instance
-pub const L0_SKIP_THRESHOLD: usize = 256 * 1024;  // 256 KiB
+pub const L0_SKIP_THRESHOLD: usize = 256 * 1024; // 256 KiB
 
 /// L2 table routing threshold.
 pub const L2_BULK_THRESHOLD: usize = 64 * 1024; // 64 KiB
 
-pub mod l2;
 pub mod l0;
+pub mod l2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]

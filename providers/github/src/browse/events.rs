@@ -10,6 +10,10 @@ use crate::omnifs::provider::types::*;
 use crate::path::FsPath;
 
 pub fn timer_tick(id: u64) -> ProviderResponse {
+    let pending_invalidations = with_state(|state| {
+        std::mem::take(&mut state.pending_host_invalidations)
+    }).unwrap_or_default();
+
     let repos = with_state(|state| {
         state.cache.advance_tick();
         // Prune stale active repos
@@ -24,17 +28,20 @@ pub fn timer_tick(id: u64) -> ProviderResponse {
     })
     .unwrap_or_default();
 
-    if repos.is_empty() {
-        return ProviderResponse::Done(ActionResult::Ok);
-    }
-
-    let effects: Vec<SingleEffect> = repos
+    // Event fetches first (one per repo), invalidations appended after.
+    // This keeps the 1:1 alignment between repos[i] and results[i].
+    let mut effects: Vec<SingleEffect> = repos
         .iter()
         .filter_map(|repo| {
             let (owner, name) = repo.split_once('/')?;
             Some(events_fetch(owner, name, event_etag(repo)))
         })
         .collect();
+
+    let invalidation_count = pending_invalidations.len();
+    effects.extend(pending_invalidations.into_iter().map(|prefix| {
+        SingleEffect::CacheInvalidatePrefix(CacheInvalidateRequest { prefix })
+    }));
 
     if effects.is_empty() {
         return ProviderResponse::Done(ActionResult::Ok);
@@ -43,7 +50,7 @@ pub fn timer_tick(id: u64) -> ProviderResponse {
     match with_state(|state| {
         state
             .pending
-            .insert(id, Continuation::FetchingEvents { repos });
+            .insert(id, Continuation::FetchingEvents { repos, invalidation_count });
     }) {
         Ok(()) => ProviderResponse::Batch(effects),
         Err(e) => err(&e),
@@ -79,13 +86,28 @@ pub fn events_fetch(owner: &str, repo: &str, etag: Option<String>) -> SingleEffe
     })
 }
 
-pub fn resume_events(repos: &[String], effect_outcome: &EffectResult) -> ProviderResponse {
-    let results = match effect_outcome {
+pub fn resume_events(repos: &[String], invalidation_count: usize, effect_outcome: &EffectResult) -> ProviderResponse {
+    let all_results = match effect_outcome {
         EffectResult::Batch(results) => results,
         EffectResult::Single(result) => std::slice::from_ref(result),
     };
 
-    for (repo, result) in repos.iter().zip(results.iter()) {
+    // The first repos.len() results correspond to event fetches;
+    // the trailing invalidation_count results are CacheOk acks (ignore).
+    if all_results.len() != repos.len() + invalidation_count {
+        crate::omnifs::provider::log::log(&LogEntry {
+            level: LogLevel::Warn,
+            message: format!(
+                "resume_events: result count mismatch: {} results, {} repos, {} invalidations",
+                all_results.len(), repos.len(), invalidation_count
+            ),
+        });
+    }
+    let event_results = &all_results[..all_results.len().saturating_sub(invalidation_count)];
+
+    let mut invalidation_prefixes: Vec<String> = Vec::new();
+
+    for (repo, result) in repos.iter().zip(event_results.iter()) {
         let SingleEffectResult::HttpResponse(resp) = result else {
             continue;
         };
@@ -93,10 +115,7 @@ pub fn resume_events(repos: &[String], effect_outcome: &EffectResult) -> Provide
             enter_cache_only();
             continue;
         }
-        if resp.status == 304 {
-            continue;
-        }
-        if resp.status >= 400 {
+        if resp.status == 304 || resp.status >= 400 {
             continue;
         }
         if let Some(etag) = header_value(&resp.headers, "etag") {
@@ -111,8 +130,17 @@ pub fn resume_events(repos: &[String], effect_outcome: &EffectResult) -> Provide
             continue;
         };
         for event in events {
-            invalidate_from_event(repo, event);
+            invalidate_from_event(repo, event, &mut invalidation_prefixes);
         }
+    }
+
+    // Queue collected invalidation prefixes for the next timer tick.
+    if !invalidation_prefixes.is_empty() {
+        invalidation_prefixes.sort();
+        invalidation_prefixes.dedup();
+        let _ = with_state(|state| {
+            state.pending_host_invalidations.extend(invalidation_prefixes);
+        });
     }
 
     ProviderResponse::Done(ActionResult::Ok)
@@ -125,7 +153,7 @@ pub fn header_value(headers: &[Header], name: &str) -> Option<String> {
         .map(|header| header.value.clone())
 }
 
-pub fn invalidate_from_event(repo: &str, event: &serde_json::Value) {
+pub fn invalidate_from_event(repo: &str, event: &serde_json::Value, host_prefixes: &mut Vec<String>) {
     let Some((owner, name)) = repo.split_once('/') else {
         return;
     };
@@ -138,14 +166,17 @@ pub fn invalidate_from_event(repo: &str, event: &serde_json::Value) {
         "IssuesEvent" => {
             let prefix = format!("{owner}/{name}/issues/");
             let _ = with_state(|state| state.cache.remove_prefix(&prefix));
+            host_prefixes.push(format!("{owner}/{name}/_issues/"));
         }
         "PullRequestEvent" => {
             let prefix = format!("{owner}/{name}/pulls/");
             let _ = with_state(|state| state.cache.remove_prefix(&prefix));
+            host_prefixes.push(format!("{owner}/{name}/_prs/"));
         }
         "WorkflowRunEvent" => {
             let prefix = format!("{owner}/{name}/actions/runs/");
             let _ = with_state(|state| state.cache.remove_prefix(&prefix));
+            host_prefixes.push(format!("{owner}/{name}/_actions/runs/"));
         }
         "IssueCommentEvent" => {
             if let Some(issue_number) = event
@@ -157,6 +188,10 @@ pub fn invalidate_from_event(repo: &str, event: &serde_json::Value) {
                 let key = format!("{owner}/{name}/issues/{issue_number}/comments");
                 let _ = with_state(|state| state.cache.remove(&key));
             }
+            // GitHub uses the issues API for both issue and PR comments,
+            // so invalidate both browse namespaces.
+            host_prefixes.push(format!("{owner}/{name}/_issues/"));
+            host_prefixes.push(format!("{owner}/{name}/_prs/"));
         }
         _ => {}
     }

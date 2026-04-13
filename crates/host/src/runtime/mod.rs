@@ -38,6 +38,7 @@ pub struct EffectRuntime {
     kv: MemoryKvExecutor,
     git: git::GitExecutor,
     l2: Option<BrowseCacheL2>,
+    invalidated_prefixes: Mutex<Vec<String>>,
 }
 
 struct HostState {
@@ -134,7 +135,10 @@ impl EffectRuntime {
         let git = git::GitExecutor::new(cloner, capability.clone());
 
         let l2 = {
-            let db_path = cache_dir.join("providers").join(mount_name).join("browse.redb");
+            let db_path = cache_dir
+                .join("providers")
+                .join(mount_name)
+                .join("browse.redb");
             match BrowseCacheL2::open(&db_path) {
                 Ok(cache) => Some(cache),
                 Err(e) => {
@@ -152,6 +156,7 @@ impl EffectRuntime {
             kv: MemoryKvExecutor::new(),
             git,
             l2,
+            invalidated_prefixes: Mutex::new(Vec::new()),
         })
     }
 
@@ -320,11 +325,26 @@ impl EffectRuntime {
         }
     }
 
+    pub fn cache_delete_prefix(&self, prefix: &str) {
+        if let Some(ref l2) = self.l2 {
+            if let Err(e) = l2.delete_prefix(prefix) {
+                tracing::debug!(prefix, error = %e, "L2 cache prefix delete failed");
+            }
+        }
+    }
+
+    /// Drain and return pending invalidated prefixes. Called by FuseFs
+    /// before checking L0 to ensure stale entries are evicted.
+    pub fn drain_invalidated_prefixes(&self) -> Vec<String> {
+        let mut prefixes = self.invalidated_prefixes.lock();
+        std::mem::take(&mut *prefixes)
+    }
+
     /// Extract projected files from DirEntries and batch-write to L2.
     fn extract_projected_files(&self, parent_path: &str, entries: &[wit_types::DirEntry]) {
         use crate::cache::{
-            AttrPayload, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache,
-            LookupPayload, RecordKind, ttl,
+            AttrPayload, CacheRecord, DirentRecord, DirentsPayload, EntryKindCache, LookupPayload,
+            RecordKind, ttl,
         };
 
         let mut batch = Vec::new();
@@ -341,11 +361,17 @@ impl EffectRuntime {
                 size: e.size.unwrap_or(0),
             })
             .collect();
-        let dirents_payload = DirentsPayload { entries: dirent_records };
+        let dirents_payload = DirentsPayload {
+            entries: dirent_records,
+        };
         batch.push((
             parent_path.to_string(),
             RecordKind::Dirents,
-            CacheRecord::new(RecordKind::Dirents, ttl::DIRENTS, dirents_payload.serialize()),
+            CacheRecord::new(
+                RecordKind::Dirents,
+                ttl::DIRENTS,
+                dirents_payload.serialize(),
+            ),
         ));
 
         for entry in entries {
@@ -362,7 +388,10 @@ impl EffectRuntime {
             let size = entry.size.unwrap_or(0);
 
             // Cache lookup record for child.
-            let lookup = LookupPayload::Positive { kind: kind_cache, size };
+            let lookup = LookupPayload::Positive {
+                kind: kind_cache,
+                size,
+            };
             batch.push((
                 child_path.clone(),
                 RecordKind::Lookup,
@@ -370,7 +399,10 @@ impl EffectRuntime {
             ));
 
             // Cache attr record for child.
-            let attr = AttrPayload { kind: kind_cache, size };
+            let attr = AttrPayload {
+                kind: kind_cache,
+                size,
+            };
             batch.push((
                 child_path.clone(),
                 RecordKind::Attr,
@@ -398,7 +430,11 @@ impl EffectRuntime {
                     batch.push((
                         file_path.clone(),
                         RecordKind::Lookup,
-                        CacheRecord::new(RecordKind::Lookup, ttl::LOOKUP_POSITIVE, pf_lookup.serialize()),
+                        CacheRecord::new(
+                            RecordKind::Lookup,
+                            ttl::LOOKUP_POSITIVE,
+                            pf_lookup.serialize(),
+                        ),
                     ));
 
                     // Attr record for the projected file.
@@ -561,6 +597,11 @@ impl EffectRuntime {
             }
             wit_types::SingleEffect::GitListCachedRepos(req) => {
                 git_response_to_wit(self.git.list_cached_repos(req.prefix.as_deref()))
+            }
+            wit_types::SingleEffect::CacheInvalidatePrefix(req) => {
+                self.cache_delete_prefix(&req.prefix);
+                self.invalidated_prefixes.lock().push(req.prefix.clone());
+                wit_types::SingleEffectResult::CacheOk
             }
             _ => wit_types::SingleEffectResult::EffectError(wit_types::EffectError {
                 kind: wit_types::ErrorKind::Internal,

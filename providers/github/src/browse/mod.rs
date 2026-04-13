@@ -75,7 +75,7 @@ pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
         Continuation::DisowningRepo => git::resume_open_repo_disown(id, result),
         Continuation::FetchingDiff { path } => events::resume_diff(&path, result),
         Continuation::FetchingRunLog { path } => events::resume_run_log(&path, result),
-        Continuation::FetchingEvents { repos } => events::resume_events(&repos, &effect_outcome),
+        Continuation::FetchingEvents { repos, invalidation_count } => events::resume_events(&repos, invalidation_count, &effect_outcome),
     }
 }
 
