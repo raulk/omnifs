@@ -183,7 +183,11 @@ jobs:
       - name: Run demo smoke script
         run: |
           set -euo pipefail
-          docker exec omnifs-smoke env OMNIFS_DEMO_MODE=smoke /tmp/demo.sh
+          docker exec omnifs-smoke env \
+            OMNIFS_DEMO_MODE=smoke \
+            OMNIFS_DEMO_OWNER=ollama \
+            OMNIFS_DEMO_REPO=ollama \
+            /tmp/demo.sh
 
       - name: Dump omnifs log on failure
         if: failure()
