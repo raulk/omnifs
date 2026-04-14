@@ -23,54 +23,41 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.1
-
-      - name: Check formatting
-        run: cargo fmt --check -p omnifs-cli -p omnifs-host
-
-      - name: Run clippy
-        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
-
-      - name: Run tests
-        run: cargo test -p omnifs-cli -p omnifs-host
-
-  providers:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: GitHub provider
-            package: omnifs-provider-github
-          - name: Test provider
-            package: test-provider
-    name: providers / ${{ matrix.name }}
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
           targets: wasm32-wasip1
 
+      - name: Set Cargo parallelism
+        run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.1
+        with:
+          cache-on-failure: true
 
-      - name: Check provider formatting
-        run: cargo fmt --check -p ${{ matrix.package }}
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run core clippy
+        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
 
       - name: Run provider clippy
-        run: cargo clippy -p ${{ matrix.package }} --target wasm32-wasip1 -- -D warnings
+        run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
 
       - name: Build providers
-        run: cargo build -p ${{ matrix.package }} --target wasm32-wasip1
+        run: |
+          set -euo pipefail
+          for manifest in providers/*/Cargo.toml; do
+            cargo component build --manifest-path "$manifest" --release --target-dir target
+          done
+
+      - name: Run core tests
+        run: cargo test -p omnifs-cli -p omnifs-host
 
   docker-smoke:
     runs-on: ubuntu-latest
-    needs: [check, providers]
+    needs: check
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6.0.2
