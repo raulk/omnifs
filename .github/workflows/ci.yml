@@ -38,6 +38,15 @@ jobs:
 
   providers:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GitHub provider
+            package: omnifs-provider-github
+          - name: Test provider
+            package: test-provider
+    name: providers / ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -51,13 +60,13 @@ jobs:
         uses: Swatinem/rust-cache@v2.9.1
 
       - name: Check provider formatting
-        run: cargo fmt --check -p omnifs-provider-github -p test-provider
+        run: cargo fmt --check -p ${{ matrix.package }}
 
       - name: Run provider clippy
-        run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
+        run: cargo clippy -p ${{ matrix.package }} --target wasm32-wasip1 -- -D warnings
 
       - name: Build providers
-        run: cargo build -p omnifs-provider-github -p test-provider --target wasm32-wasip1
+        run: cargo build -p ${{ matrix.package }} --target wasm32-wasip1
 
   docker-smoke:
     runs-on: ubuntu-latest
