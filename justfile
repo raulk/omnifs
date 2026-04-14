@@ -1,5 +1,5 @@
-image := "omnifs-dev"
-container := "omnifs-shell"
+image := "ghcr.io/raulk/omnifs:latest"
+container := "omnifs"
 
 check: build-providers
     cargo fmt --all --check
@@ -29,7 +29,7 @@ test-integration: build-providers
 build:
     docker build -t {{image}} .
 
-start: build
+start:
     #!/usr/bin/env bash
     set -euo pipefail
     export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
@@ -45,8 +45,7 @@ start: build
       -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
       -v "$SSH_AUTH_SOCK:/ssh-agent" \
       -v "$(pwd)/scripts/demo.sh:/tmp/demo.sh:ro" \
-      {{image}} \
-      bash -lc 'RUST_LOG=info exec omnifs mount --mount-point /github --config-dir /root/.omnifs --cache-dir /tmp/omnifs-cache >/tmp/omnifs.log 2>&1'
+      {{image}}
     for _ in $(seq 1 60); do
       if docker exec {{container}} sh -lc "grep -qs ' /github ' /proc/mounts"; then
         exit 0

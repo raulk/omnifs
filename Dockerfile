@@ -75,7 +75,8 @@ RUN printf '%s\n' \
         >/etc/zsh/zshrc
 
 COPY scripts/demo.sh /tmp/demo.sh
-RUN chmod 0755 /tmp/demo.sh \
+COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
+RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
     && mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
 
 RUN cat > /root/.omnifs/providers/github.toml <<'CONF'
@@ -97,6 +98,7 @@ CONF
 SHELL ["/bin/zsh", "-c"]
 ENV SHELL=/bin/zsh
 WORKDIR /
+ENTRYPOINT ["/usr/local/bin/omnifs-container-entrypoint"]
 
 FROM runtime-base AS runtime-prebuilt
 
