@@ -138,6 +138,41 @@ impl FuseFs {
         l0.put(L0Key::new(inode, kind, aux), record);
     }
 
+    fn read_slice(data: &[u8], offset: u64, size: u32) -> &[u8] {
+        let Some(start) = usize::try_from(offset).ok() else {
+            return &[];
+        };
+        if start >= data.len() {
+            return &[];
+        }
+
+        let end = start.saturating_add(size as usize).min(data.len());
+        &data[start..end]
+    }
+
+    fn cache_and_reply_file(
+        &self,
+        fh: FuseFileHandle,
+        data: Vec<u8>,
+        offset: u64,
+        size: u32,
+        reply: ReplyData,
+    ) {
+        let chunk = Self::read_slice(&data, offset, size);
+        reply.data(chunk);
+        self.file_cache.insert(fh.0, data);
+    }
+
+    fn promote_l2_file(&self, mount: &str, path: &str, ino: u64) -> Option<Vec<u8>> {
+        let runtime = self.runtime_for_mount(mount)?;
+        let record = runtime.cache_get(path, RecordKind::File)?;
+        tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount, "cache hit");
+
+        let data = record.payload.clone();
+        self.l0_put(mount, ino, RecordKind::File, None, record);
+        Some(data)
+    }
+
     /// Drain pending invalidation prefixes from the runtime and evict
     /// matching L0 cache entries. Coarse: iterates all inodes for the mount
     /// and evicts any whose path starts with an invalidated prefix.
@@ -763,7 +798,12 @@ impl Filesystem for FuseFs {
             return;
         };
 
-        for (index, (ino, name, kind)) in snapshot.iter().enumerate().skip(offset as usize) {
+        let Some(start) = usize::try_from(offset).ok() else {
+            reply.ok();
+            return;
+        };
+
+        for (index, (ino, name, kind)) in snapshot.iter().enumerate().skip(start) {
             let ftype = match kind {
                 EntryKind::Directory => fuser::FileType::Directory,
                 EntryKind::File => fuser::FileType::RegularFile,
@@ -808,13 +848,7 @@ impl Filesystem for FuseFs {
 
         // Serve from cache if this file handle already has data.
         if let Some(cached) = self.file_cache.get(&fh.0) {
-            let start = offset as usize;
-            let end = (start + size as usize).min(cached.len());
-            if start >= cached.len() {
-                reply.data(&[]);
-            } else {
-                reply.data(&cached[start..end]);
-            }
+            reply.data(Self::read_slice(&cached, offset, size));
             return;
         }
 
@@ -830,54 +864,23 @@ impl Filesystem for FuseFs {
         // L0: check cached file by inode
         if let Some(record) = self.l0_get(&mount_name, ino.0, RecordKind::File, None) {
             tracing::debug!(target: "omnifs_cache", kind = "l0_hit", op = "read", mount = mount_name.as_str(), "cache hit");
-            let data = &record.payload;
-            let start = offset as usize;
-            let end = (start + size as usize).min(data.len());
-            if start >= data.len() {
-                reply.data(&[]);
-            } else {
-                reply.data(&data[start..end]);
-            }
-            self.file_cache.insert(fh.0, data.clone());
+            let data = record.payload.clone();
+            self.cache_and_reply_file(fh, data, offset, size, reply);
             return;
         }
 
         // L2: check cached file by path (only for non-passthrough)
-        if backing_path.is_none() {
-            if let Some(runtime) = self.runtime_for_mount(&mount_name) {
-                if let Some(record) = runtime.cache_get(&path, RecordKind::File) {
-                    tracing::debug!(target: "omnifs_cache", kind = "l2_hit", op = "read", mount = mount_name.as_str(), "cache hit");
-                    let data = record.payload.clone();
-                    // Promote to L0
-                    self.l0_put(&mount_name, ino.0, RecordKind::File, None, record.clone());
-                    let start = offset as usize;
-                    let end = (start + size as usize).min(data.len());
-                    if start >= data.len() {
-                        self.file_cache.insert(fh.0, data);
-                        reply.data(&[]);
-                    } else {
-                        reply.data(&data[start..end]);
-                        self.file_cache.insert(fh.0, data);
-                    }
-                    return;
-                }
-            }
+        if backing_path.is_none()
+            && let Some(data) = self.promote_l2_file(&mount_name, &path, ino.0)
+        {
+            self.cache_and_reply_file(fh, data, offset, size, reply);
+            return;
         }
 
         // Passthrough for inodes with backing_path.
         if let Some(ref rp) = backing_path {
             match std::fs::read(rp) {
-                Ok(data) => {
-                    let start = offset as usize;
-                    let end = (start + size as usize).min(data.len());
-                    if start >= data.len() {
-                        self.file_cache.insert(fh.0, data);
-                        reply.data(&[]);
-                    } else {
-                        reply.data(&data[start..end]);
-                        self.file_cache.insert(fh.0, data);
-                    }
-                }
+                Ok(data) => self.cache_and_reply_file(fh, data, offset, size, reply),
                 Err(_) => reply.error(Errno::EIO),
             }
             return;
@@ -905,16 +908,7 @@ impl Filesystem for FuseFs {
                     rt.cache_put(&path, RecordKind::File, &file_record);
                 }
                 self.l0_put(&mount_name, ino.0, RecordKind::File, None, file_record);
-
-                let start = offset as usize;
-                let end = (start + size as usize).min(data.len());
-                if start >= data.len() {
-                    self.file_cache.insert(fh.0, data);
-                    reply.data(&[]);
-                } else {
-                    reply.data(&data[start..end]);
-                    self.file_cache.insert(fh.0, data);
-                }
+                self.cache_and_reply_file(fh, data, offset, size, reply);
             }
             Ok(ActionResult::Err(msg)) => {
                 tracing::warn!(path, error = msg, "provider returned error for read_file");
