@@ -21,7 +21,7 @@ env:
   DOCKER_CACHE_SCOPE: omnifs-image-${{ github.head_ref || github.ref_name }}
 
 jobs:
-  rust-build-and-test:
+  rust-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -38,6 +38,38 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.1
         with:
+          prefix-key: v1-rust
+          shared-key: omnifs-rust-v1
+          cache-on-failure: true
+          save-if: false
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run core clippy
+        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
+
+      - name: Run provider clippy
+        run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
+
+  rust-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Set Cargo parallelism
+        run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          prefix-key: v1-rust
+          shared-key: omnifs-rust-v1
           cache-on-failure: true
 
       - name: Install cargo-component
@@ -49,15 +81,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Run core clippy
-        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
-
-      - name: Run provider clippy
-        run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
 
       - name: Build providers
         run: |
@@ -89,7 +112,7 @@ jobs:
 
   docker-pull-smoke:
     runs-on: ubuntu-latest
-    needs: rust-build-and-test
+    needs: rust-build-test
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6.0.2
@@ -188,7 +211,7 @@ jobs:
 
   docker-compose-smoke:
     runs-on: ubuntu-latest
-    needs: rust-build-and-test
+    needs: rust-build-test
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6.0.2
@@ -252,7 +275,7 @@ jobs:
 
   docker-publish:
     runs-on: ubuntu-latest
-    needs: [rust-build-and-test, docker-pull-smoke, docker-compose-smoke]
+    needs: [rust-lint, rust-build-test, docker-pull-smoke, docker-compose-smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
