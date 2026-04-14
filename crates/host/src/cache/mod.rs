@@ -52,7 +52,7 @@ impl RecordKind {
     }
 }
 
-/// Mirror of WIT EntryKind for cache payloads, avoiding a dependency
+/// Mirror of WIT `EntryKind` for cache payloads, avoiding a dependency
 /// on the generated WIT types in the cache module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
@@ -100,7 +100,8 @@ impl CacheRecord {
         Duration::from_secs(self.expires_at.saturating_sub(self.created_at))
     }
 
-    /// Serialize to bytes: [schema_version:1][kind:1][created_at:8][expires_at:8][payload:*]
+    /// Serialize to bytes:
+    /// [`schema_version:1`][`kind:1`][`created_at:8`][`expires_at:8`][`payload:*`]
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(18 + self.payload.len());
         buf.push(self.schema_version);

@@ -105,7 +105,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             registry.start_timers(&rt);
 
             tracing::info!(mount_point, "starting FUSE mount");
-            omnifs_host::mount::mount_blocking(&mount_path, registry, rt)?;
+            omnifs_host::mount::mount_blocking(&mount_path, &registry, rt)?;
             Ok(())
         }
         Commands::Unmount { mount_point } => {

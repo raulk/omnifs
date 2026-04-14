@@ -1,5 +1,7 @@
 #!/usr/bin/env zsh
-# omnifs demo: run inside the container with: zsh /work/demo.sh
+# omnifs demo: the image bakes this script to `/tmp/demo.sh`.
+# In the local dev container, the repo copy is also bind-mounted at `/tmp/demo.sh`
+# so you can iterate on the script without rebuilding the image.
 
 alias ls="ls --color=always"
 
@@ -76,6 +78,55 @@ act() {
     show_prompt
     sleep 1
 }
+
+run_smoke_demo() {
+    set -euo pipefail
+
+    local owner=${OMNIFS_DEMO_OWNER:-raulk}
+    local repo=${OMNIFS_DEMO_REPO:-omnifs}
+
+    print -r -- "omnifs smoke demo: /github/${owner}/${repo}"
+
+    cd "/github/${owner}"
+    ls
+
+    cd "$repo"
+    ls
+
+    cd _issues/_open
+    ls
+    local first_issue
+    first_issue=$(ls | head -n 1)
+    [[ -n $first_issue ]]
+    cd "$first_issue"
+    bat title
+    [[ -f body ]] && bat -l md body
+
+    cd ../../_prs/_open
+    ls
+    local first_pr
+    first_pr=$(ls | head -n 1)
+    [[ -n $first_pr ]]
+    cd "$first_pr"
+    bat title
+    bat state
+
+    if cd ../../_actions/runs 2>/dev/null; then
+        ls
+        local first_run
+        first_run=$(ls | head -n 1)
+        if [[ -n $first_run ]]; then
+            cd "$first_run"
+            [[ -f status ]] && bat status
+            [[ -f conclusion ]] && bat conclusion
+        fi
+    fi
+}
+
+if [[ ${OMNIFS_DEMO_MODE:-full} == smoke ]]; then
+    run_smoke_demo
+    exit 0
+fi
 
 clear
 sleep 1

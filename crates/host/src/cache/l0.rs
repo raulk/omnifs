@@ -27,7 +27,7 @@ impl BrowseCacheL0 {
         let cache = Cache::builder()
             .max_capacity(L0_MAX_WEIGHT)
             .weigher(|key: &L0Key, value: &Arc<CacheRecord>| -> u32 {
-                let key_size = 8 + 1 + key.aux.as_ref().map_or(0, |s| s.len());
+                let key_size = 8 + 1 + key.aux.as_ref().map_or(0, String::len);
                 let val_size = 18 + value.payload.len();
                 (key_size + val_size).try_into().unwrap_or(u32::MAX)
             })

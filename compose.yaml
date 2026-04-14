@@ -19,7 +19,7 @@ services:
       - github_token
     volumes:
       - ${SSH_AUTH_SOCK:?set SSH_AUTH_SOCK on the host}:/ssh-agent
-      - ./scripts/demo.sh:/work/demo.sh:ro
+      - ./scripts/demo.sh:/tmp/demo.sh:ro
     command:
       - bash
       - -lc

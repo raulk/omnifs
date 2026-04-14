@@ -238,7 +238,7 @@ impl EffectRuntime {
         }
 
         // Strip projected_files before returning to FUSE.
-        Ok(self.strip_projected_files(result))
+        Ok(Self::strip_projected_files(result))
     }
 
     pub async fn call_read_file(
@@ -311,37 +311,37 @@ impl EffectRuntime {
     }
 
     pub fn cache_put(&self, path: &str, kind: RecordKind, record: &CacheRecord) {
-        if let Some(ref l2) = self.l2 {
-            if let Err(e) = l2.put(path, kind, record) {
-                tracing::debug!(path, error = %e, "L2 cache put failed");
-            }
+        if let Some(ref l2) = self.l2
+            && let Err(e) = l2.put(path, kind, record)
+        {
+            tracing::debug!(path, error = %e, "L2 cache put failed");
         }
     }
 
     pub fn cache_put_batch(&self, records: &[(String, RecordKind, CacheRecord)]) {
-        if let Some(ref l2) = self.l2 {
-            if let Err(e) = l2.put_batch(records) {
-                tracing::debug!(error = %e, "L2 cache batch put failed");
-            }
+        if let Some(ref l2) = self.l2
+            && let Err(e) = l2.put_batch(records)
+        {
+            tracing::debug!(error = %e, "L2 cache batch put failed");
         }
     }
 
     pub fn cache_delete_prefix(&self, prefix: &str) {
-        if let Some(ref l2) = self.l2 {
-            if let Err(e) = l2.delete_prefix(prefix) {
-                tracing::debug!(prefix, error = %e, "L2 cache prefix delete failed");
-            }
+        if let Some(ref l2) = self.l2
+            && let Err(e) = l2.delete_prefix(prefix)
+        {
+            tracing::debug!(prefix, error = %e, "L2 cache prefix delete failed");
         }
     }
 
-    /// Drain and return pending invalidated prefixes. Called by FuseFs
+    /// Drain and return pending invalidated prefixes. Called by `FuseFs`
     /// before checking L0 to ensure stale entries are evicted.
     pub fn drain_invalidated_prefixes(&self) -> Vec<String> {
         let mut prefixes = self.invalidated_prefixes.lock();
         std::mem::take(&mut *prefixes)
     }
 
-    /// Extract projected files from DirEntries and batch-write to L2.
+    /// Extract projected files from `DirEntries` and batch-write to L2.
     fn extract_projected_files(
         &self,
         parent_path: &str,
@@ -420,7 +420,7 @@ impl EffectRuntime {
             if let Some(ref projected) = entry.projected_files {
                 for pf in projected {
                     let file_path = format!("{child_path}/{}", pf.name);
-                    let file_size = pf.content.len() as u64;
+                    let file_size = u64::try_from(pf.content.len()).unwrap_or(u64::MAX);
 
                     // File content record.
                     batch.push((
@@ -464,8 +464,8 @@ impl EffectRuntime {
         }
     }
 
-    /// Strip projected_files from DirEntries before handing to FUSE.
-    fn strip_projected_files(&self, result: wit_types::ActionResult) -> wit_types::ActionResult {
+    /// Strip `projected_files` from `DirEntries` before handing to FUSE.
+    fn strip_projected_files(result: wit_types::ActionResult) -> wit_types::ActionResult {
         if let wit_types::ActionResult::DirEntries(listing) = result {
             let stripped: Vec<wit_types::DirEntry> = listing
                 .entries

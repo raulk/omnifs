@@ -26,6 +26,11 @@ struct AuthInjector {
     header_value: Option<String>,
 }
 
+enum CredentialSetting {
+    NotConfigured,
+    Configured(Option<String>),
+}
+
 impl AuthManager {
     pub fn none() -> Self {
         Self { injectors: vec![] }
@@ -48,11 +53,14 @@ impl AuthManager {
     fn build_injector(config: &AuthConfig) -> Result<AuthInjector, AuthError> {
         match config.auth_type.as_str() {
             "bearer-token" => {
-                let token = read_credential(config).ok_or_else(|| {
-                    AuthError::CredentialSourceMissing(
-                        "token_env or token_file required for bearer-token".to_string(),
-                    )
-                })?;
+                let token = match read_credential(config) {
+                    CredentialSetting::Configured(token) => token,
+                    CredentialSetting::NotConfigured => {
+                        return Err(AuthError::CredentialSourceMissing(
+                            "token_env or token_file required for bearer-token".to_string(),
+                        ));
+                    }
+                };
                 Ok(AuthInjector {
                     domain: config.domain.clone(),
                     header_name: "Authorization".to_string(),
@@ -60,11 +68,14 @@ impl AuthManager {
                 })
             }
             "api-key-header" => {
-                let key = read_credential(config).ok_or_else(|| {
-                    AuthError::CredentialSourceMissing(
-                        "token_env or token_file required for api-key-header".to_string(),
-                    )
-                })?;
+                let key = match read_credential(config) {
+                    CredentialSetting::Configured(key) => key,
+                    CredentialSetting::NotConfigured => {
+                        return Err(AuthError::CredentialSourceMissing(
+                            "token_env or token_file required for api-key-header".to_string(),
+                        ));
+                    }
+                };
                 let header = config.header.as_deref().unwrap_or("X-API-Key");
                 Ok(AuthInjector {
                     domain: config.domain.clone(),
@@ -103,17 +114,17 @@ impl AuthManager {
     }
 }
 
-fn read_credential(config: &AuthConfig) -> Option<Option<String>> {
+fn read_credential(config: &AuthConfig) -> CredentialSetting {
     if let Some(path) = config.token_file.as_deref() {
         let token = std::fs::read_to_string(path)
             .ok()
             .map(|contents| contents.trim().to_string())
             .filter(|contents| !contents.is_empty());
-        return Some(token);
+        return CredentialSetting::Configured(token);
     }
 
-    config
-        .token_env
-        .as_deref()
-        .map(|env_var| std::env::var(env_var).ok())
+    match config.token_env.as_deref() {
+        Some(env_var) => CredentialSetting::Configured(std::env::var(env_var).ok()),
+        None => CredentialSetting::NotConfigured,
+    }
 }

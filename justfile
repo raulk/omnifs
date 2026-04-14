@@ -4,13 +4,13 @@ container := "omnifs-shell"
 check: build-providers
     cargo fmt --all --check
     cargo clippy -- -D warnings
+    cargo test
     just check-providers
-    cargo test -p omnifs-host
 
 check-providers:
-    cd providers && cargo check --workspace --target wasm32-wasip1
-    cd providers && cargo clippy --workspace --target wasm32-wasip1 -- -D warnings
-    cd providers && cargo test --workspace --target wasm32-wasip1 --no-run
+    cargo check -p omnifs-provider-github -p test-provider --target wasm32-wasip1
+    cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
+    cargo test -p omnifs-provider-github -p test-provider --target wasm32-wasip1 --no-run
 
 build-providers:
     #!/usr/bin/env bash
@@ -44,7 +44,7 @@ start: build
       -e SSH_AUTH_SOCK=/ssh-agent \
       -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
       -v "$SSH_AUTH_SOCK:/ssh-agent" \
-      -v "$(pwd)/scripts/demo.sh:/work/demo.sh:ro" \
+      -v "$(pwd)/scripts/demo.sh:/tmp/demo.sh:ro" \
       {{image}} \
       bash -lc 'RUST_LOG=info exec omnifs mount --mount-point /github --config-dir /root/.omnifs --cache-dir /tmp/omnifs-cache >/tmp/omnifs.log 2>&1'
     for _ in $(seq 1 60); do

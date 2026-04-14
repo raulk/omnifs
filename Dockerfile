@@ -15,7 +15,7 @@ RUN cargo install cargo-chef --locked \
 
 FROM toolchain AS planner
 WORKDIR /src
-COPY --exclude=providers . .
+COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM toolchain AS deps
@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM toolchain AS providers
 WORKDIR /src
-COPY --exclude=crates . .
+COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo component build \
         --manifest-path providers/github/Cargo.toml \
@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM deps AS builder
 WORKDIR /src
-COPY --exclude=providers . .
+COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release -p omnifs-cli \
@@ -75,6 +75,8 @@ RUN printf '%s\n' \
         >/etc/zsh/zshrc
 
 COPY --from=builder /omnifs /usr/local/bin/
+COPY scripts/demo.sh /tmp/demo.sh
+RUN chmod 0755 /tmp/demo.sh
 
 RUN mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
 COPY --from=providers /src/target/wasm32-wasip1/release/omnifs_provider_github.wasm \

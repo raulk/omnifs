@@ -8,12 +8,14 @@ const METADATA_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("metad
 const CONTENT_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("content");
 const BULK_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("bulk");
 
+type L2Result<T> = anyhow::Result<T>;
+
 pub struct BrowseCacheL2 {
     db: Database,
 }
 
 impl BrowseCacheL2 {
-    pub fn open(path: &Path) -> Result<Self, redb::Error> {
+    pub fn open(path: &Path) -> L2Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -29,31 +31,26 @@ impl BrowseCacheL2 {
         Ok(Self { db })
     }
 
-    pub fn get(&self, path: &str, kind: RecordKind) -> Result<Option<CacheRecord>, redb::Error> {
+    pub fn get(&self, path: &str, kind: RecordKind) -> L2Result<Option<CacheRecord>> {
         let txn = self.db.begin_read()?;
         let key = make_key(path, kind);
 
         // For File records, check content first, then bulk.
         if kind == RecordKind::File {
-            if let Some(record) = self.read_from_table(&txn, CONTENT_TABLE, &key)? {
+            if let Some(record) = Self::read_from_table(&txn, CONTENT_TABLE, &key)? {
                 return Ok(Some(record));
             }
-            return self.read_from_table(&txn, BULK_TABLE, &key);
+            return Self::read_from_table(&txn, BULK_TABLE, &key);
         }
 
-        self.read_from_table(&txn, METADATA_TABLE, &key)
+        Self::read_from_table(&txn, METADATA_TABLE, &key)
     }
 
-    pub fn put(
-        &self,
-        path: &str,
-        kind: RecordKind,
-        record: &CacheRecord,
-    ) -> Result<(), redb::Error> {
+    pub fn put(&self, path: &str, kind: RecordKind, record: &CacheRecord) -> L2Result<()> {
         let txn = self.db.begin_write()?;
         let key = make_key(path, kind);
         let bytes = record.serialize();
-        let target = self.table_for(kind, record.payload.len());
+        let target = Self::table_for(kind, record.payload.len());
         {
             let mut table = txn.open_table(target)?;
             table.insert(key.as_str(), bytes.as_slice())?;
@@ -66,13 +63,11 @@ impl BrowseCacheL2 {
             let mut other_table = txn.open_table(other)?;
             other_table.remove(key.as_str())?;
         }
-        Ok(txn.commit()?)
+        txn.commit()?;
+        Ok(())
     }
 
-    pub fn put_batch(
-        &self,
-        records: &[(String, RecordKind, CacheRecord)],
-    ) -> Result<(), redb::Error> {
+    pub fn put_batch(&self, records: &[(String, RecordKind, CacheRecord)]) -> L2Result<()> {
         let txn = self.db.begin_write()?;
         {
             let mut meta = txn.open_table(METADATA_TABLE)?;
@@ -97,15 +92,15 @@ impl BrowseCacheL2 {
                 }
             }
         }
-        Ok(txn.commit()?)
+        txn.commit()?;
+        Ok(())
     }
 
     fn read_from_table(
-        &self,
         txn: &redb::ReadTransaction,
         table_def: TableDefinition<&str, &[u8]>,
         key: &str,
-    ) -> Result<Option<CacheRecord>, redb::Error> {
+    ) -> L2Result<Option<CacheRecord>> {
         let table = txn.open_table(table_def)?;
         let Some(value) = table.get(key)? else {
             return Ok(None);
@@ -120,7 +115,6 @@ impl BrowseCacheL2 {
     }
 
     fn table_for(
-        &self,
         kind: RecordKind,
         payload_len: usize,
     ) -> TableDefinition<'static, &'static str, &'static [u8]> {
@@ -138,7 +132,7 @@ impl BrowseCacheL2 {
     /// The stored key format is `{kind_char}:{path}`, so we scan each table
     /// for keys matching `L:{prefix}`, `A:{prefix}`, `D:{prefix}`, `F:{prefix}`
     /// using redb's ordered range iteration.
-    pub fn delete_prefix(&self, prefix: &str) -> Result<usize, redb::Error> {
+    pub fn delete_prefix(&self, prefix: &str) -> L2Result<usize> {
         let txn = self.db.begin_write()?;
         let mut deleted = 0;
         let tables = [METADATA_TABLE, CONTENT_TABLE, BULK_TABLE];

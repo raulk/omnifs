@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
-exclude = ["providers"]
+members = ["crates/*", "providers/github", "providers/test"]
+default-members = ["crates/cli", "crates/host"]
 
 [workspace.dependencies]
 wasmtime = { version = "43", features = ["component-model", "runtime"] }
