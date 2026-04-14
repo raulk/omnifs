@@ -84,44 +84,35 @@ run_smoke_demo() {
 
     local owner=${OMNIFS_DEMO_OWNER:-raulk}
     local requested_repo=${OMNIFS_DEMO_REPO:-omnifs}
-    local repo_root="/github/${owner}"
-    local discovered_repo=""
+    local owner_root="/github/${owner}"
+    local requested_repo_root="${owner_root}/${requested_repo}"
+    local repo_root=""
 
-    print -r -- "omnifs smoke demo: /github/${owner}/${requested_repo}"
+    print -r -- "omnifs smoke demo: ${requested_repo_root}"
 
-    cd "/github/${owner}"
-    ls
-
-    for _ in {1..15}; do
-        if cd "$requested_repo" 2>/dev/null; then
+    for _ in {1..30}; do
+        if cd "${requested_repo_root}" 2>/dev/null; then
             repo_root=$PWD
             break
         fi
 
-        if [[ -d _issues && -d _prs ]]; then
-            repo_root=$PWD
+        if [[ -d ${requested_repo_root}/_issues/_open && -d ${requested_repo_root}/_prs/_open ]]; then
+            repo_root=${requested_repo_root}
             break
         fi
 
-        local candidate
-        for candidate in *(N); do
-            if [[ -d $candidate && $candidate != _* ]]; then
-                discovered_repo=$candidate
-                break
-            fi
-        done
-
-        if [[ -n $discovered_repo ]]; then
-            cd "$discovered_repo"
-            repo_root=$PWD
+        if [[ -d ${owner_root}/_issues/_open && -d ${owner_root}/_prs/_open ]]; then
+            repo_root=${owner_root}
             break
         fi
 
         sleep 1
     done
 
+    [[ -n ${repo_root} ]]
     [[ -d ${repo_root}/_issues/_open ]]
 
+    cd "${repo_root}"
     ls
 
     cd "${repo_root}/_issues/_open"
