@@ -6,6 +6,10 @@ omnifs projects the entire world into your local filesystem. GitHub repos, Huggi
 
 Plan 9 was right, just 40 years early. Everything is a file. The world moved to APIs; omnifs moves it back to paths, for humans and agents alike.
 
+<p align="center">
+  <img src="https://github.com/raulk/omnifs/releases/download/demo-assets/omnifs-demo-10fps.gif" alt="omnifs demo" width="960">
+</p>
+
 ## Quickstart
 
 ### Prerequisites
