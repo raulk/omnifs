@@ -20,55 +20,7 @@ env:
   DOCKER_CACHE_SCOPE: omnifs-image-${{ github.head_ref || github.ref_name }}
 
 jobs:
-  build-runtime-artifacts:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Set Cargo parallelism
-        run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.1
-        with:
-          cache-on-failure: true
-
-      - name: Install cargo-component
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-component
-
-      - name: Build providers
-        run: |
-          set -euo pipefail
-          for manifest in providers/*/Cargo.toml; do
-            cargo component build --manifest-path "$manifest" --release --target-dir target
-          done
-
-      - name: Build CLI release binary
-        run: cargo build --release -p omnifs-cli
-
-      - name: Stage runtime artifacts
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          cp target/release/omnifs dist/omnifs
-          cp target/wasm32-wasip1/release/omnifs_provider_github.wasm dist/omnifs_provider_github.wasm
-
-      - name: Upload runtime artifacts
-        uses: actions/upload-artifact@v4.6.2
-        with:
-          name: omnifs-runtime-artifacts
-          path: dist/
-          if-no-files-found: error
-          compression-level: 0
-
-  check:
+  rust-build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -92,6 +44,11 @@ jobs:
         with:
           tool: cargo-component
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -109,11 +66,29 @@ jobs:
           done
 
       - name: Run core tests
-        run: cargo test -p omnifs-cli -p omnifs-host
+        run: cargo nextest run --release -p omnifs-cli -p omnifs-host
+
+      - name: Build CLI release binary
+        run: cargo build --release -p omnifs-cli
+
+      - name: Stage runtime artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/omnifs dist/omnifs
+          cp target/wasm32-wasip1/release/omnifs_provider_github.wasm dist/omnifs_provider_github.wasm
+
+      - name: Upload runtime artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: omnifs-runtime-artifacts
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
 
   docker-build:
     runs-on: ubuntu-latest
-    needs: build-runtime-artifacts
+    needs: rust-build-and-test
     timeout-minutes: 30
     outputs:
       image-artifact: omnifs-ci-image
@@ -222,7 +197,7 @@ jobs:
 
   docker-publish:
     runs-on: ubuntu-latest
-    needs: [check, docker-build, docker-smoke]
+    needs: [rust-build-and-test, docker-build, docker-smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
