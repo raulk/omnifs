@@ -14,11 +14,33 @@ Plan 9 was right, just 40 years early. Everything is a file. The world moved to 
 
 ### Prerequisites
 
-- Docker and Docker Compose
+- Docker
 - SSH agent running with a GitHub key loaded
 - `gh` CLI (for generating a token)
+- Docker Compose, if you want to build the local image
 
-### Launch
+### Published Docker image
+
+Run the published image directly:
+
+```bash
+docker run -d \
+  --name omnifs \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  -e GITHUB_TOKEN="$(gh auth token)" \
+  -e SSH_AUTH_SOCK=/ssh-agent \
+  -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
+  -v "$SSH_AUTH_SOCK:/ssh-agent" \
+  ghcr.io/raulk/omnifs:latest
+
+docker exec -it omnifs /bin/zsh
+```
+
+Use `docker logs omnifs` to inspect logs and `docker rm -f omnifs` to stop the container.
+
+### Local Docker image with Compose
 
 ```bash
 git clone https://github.com/raulk/omnifs
@@ -43,11 +65,11 @@ ls
 cd /github/ollama/ollama/_repo
 ls
 
-cd /github/ollama/_issues/_open
+cd /github/ollama/ollama/_issues/_open
 ls
 ```
 
-Use `docker compose logs omnifs` to inspect logs and `docker compose down` to stop the container.
+Use `docker compose logs omnifs` to inspect logs and `docker compose down` to stop the source-built container.
 
 <details>
 <summary>SSH agent troubleshooting</summary>

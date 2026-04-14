@@ -4,8 +4,8 @@ services:
   omnifs:
     build:
       context: .
-    image: omnifs-dev
-    container_name: omnifs-shell
+    image: ghcr.io/raulk/omnifs:latest
+    container_name: omnifs
     devices:
       - /dev/fuse:/dev/fuse
     cap_add:
@@ -20,15 +20,6 @@ services:
     volumes:
       - ${SSH_AUTH_SOCK:?set SSH_AUTH_SOCK on the host}:/ssh-agent
       - ./scripts/demo.sh:/tmp/demo.sh:ro
-    command:
-      - bash
-      - -lc
-      - >
-        RUST_LOG=info exec omnifs mount
-        --mount-point /github
-        --config-dir /root/.omnifs
-        --cache-dir /tmp/omnifs-cache
-        >/tmp/omnifs.log 2>&1
 
 secrets:
   github_token:

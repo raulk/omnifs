@@ -17,10 +17,11 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   DOCKER_IMAGE_NAME: omnifs-ci
+  DOCKER_IMAGE_ARTIFACT: omnifs-ci-image
   DOCKER_CACHE_SCOPE: omnifs-image-${{ github.head_ref || github.ref_name }}
 
 jobs:
-  rust-build-and-test:
+  rust-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -37,6 +38,38 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.1
         with:
+          prefix-key: v1-rust
+          shared-key: omnifs-rust-v1
+          cache-on-failure: true
+          save-if: false
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run core clippy
+        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
+
+      - name: Run provider clippy
+        run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
+
+  rust-build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Set Cargo parallelism
+        run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.1
+        with:
+          prefix-key: v1-rust
+          shared-key: omnifs-rust-v1
           cache-on-failure: true
 
       - name: Install cargo-component
@@ -48,15 +81,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Run core clippy
-        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
-
-      - name: Run provider clippy
-        run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
 
       - name: Build providers
         run: |
@@ -86,12 +110,10 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  docker-build:
+  docker-pull-smoke:
     runs-on: ubuntu-latest
-    needs: rust-build-and-test
+    needs: rust-build-test
     timeout-minutes: 30
-    outputs:
-      image-artifact: omnifs-ci-image
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -123,7 +145,7 @@ jobs:
         if: steps.docker-build.outcome == 'success'
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: omnifs-ci-image
+          name: ${{ env.DOCKER_IMAGE_ARTIFACT }}
           path: /tmp/omnifs-ci.tar
           if-no-files-found: error
           compression-level: 0
@@ -131,17 +153,6 @@ jobs:
       - name: Fail if Docker build failed
         if: steps.docker-build.outcome != 'success'
         run: exit 1
-
-  docker-smoke:
-    runs-on: ubuntu-latest
-    needs: docker-build
-    timeout-minutes: 30
-    steps:
-      - name: Download Docker image
-        uses: actions/download-artifact@v4.3.0
-        with:
-          name: ${{ needs.docker-build.outputs.image-artifact }}
-          path: /tmp
 
       - name: Load Docker image
         run: docker load -i /tmp/omnifs-ci.tar
@@ -159,8 +170,7 @@ jobs:
             --security-opt apparmor:unconfined \
             -e GITHUB_TOKEN="$GITHUB_TOKEN" \
             -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
-            ${{ env.DOCKER_IMAGE_NAME }}:latest \
-            bash -lc 'RUST_LOG=info exec omnifs mount --mount-point /github --config-dir /root/.omnifs --cache-dir /tmp/omnifs-cache >/tmp/omnifs.log 2>&1'
+            ${{ env.DOCKER_IMAGE_NAME }}:latest
 
           for _ in $(seq 1 60); do
             if docker exec omnifs-smoke sh -lc "grep -qs ' /github ' /proc/mounts"; then
@@ -199,9 +209,73 @@ jobs:
         if: always()
         run: docker rm -f omnifs-smoke >/dev/null 2>&1 || true
 
+  docker-compose-smoke:
+    runs-on: ubuntu-latest
+    needs: rust-build-test
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@v2
+
+      - name: Start SSH agent socket
+        run: |
+          set -euo pipefail
+          eval "$(ssh-agent -a "$RUNNER_TEMP/ssh-agent.sock")"
+          echo "SSH_AUTH_SOCK=$RUNNER_TEMP/ssh-agent.sock" >> "$GITHUB_ENV"
+
+      - name: Create GitHub token secret
+        run: |
+          set -euo pipefail
+          mkdir -p .secrets
+          printf '%s' "${{ github.token }}" > .secrets/github_token
+
+      - name: Start compose stack
+        run: |
+          set -euo pipefail
+          docker compose up --build -d
+
+          for _ in $(seq 1 60); do
+            if docker compose exec -T omnifs sh -lc "grep -qs ' /github ' /proc/mounts"; then
+              exit 0
+            fi
+
+            if ! docker ps --format '{{.Names}}' | grep -qx omnifs; then
+              docker compose logs omnifs >&2 || true
+              docker compose exec -T omnifs sh -lc 'cat /tmp/omnifs.log' >&2 || true
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          docker compose logs omnifs >&2 || true
+          docker compose exec -T omnifs sh -lc 'cat /tmp/omnifs.log' >&2 || true
+          exit 1
+
+      - name: Run compose smoke script
+        run: |
+          set -euo pipefail
+          docker compose exec -T omnifs env \
+            OMNIFS_DEMO_MODE=smoke \
+            OMNIFS_DEMO_OWNER=ollama \
+            OMNIFS_DEMO_REPO=ollama \
+            /tmp/demo.sh
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: |
+          docker compose logs omnifs || true
+          docker compose exec -T omnifs sh -lc 'cat /tmp/omnifs.log' || true
+
+      - name: Clean up compose stack
+        if: always()
+        run: docker compose down --remove-orphans --volumes
+
   docker-publish:
     runs-on: ubuntu-latest
-    needs: [rust-build-and-test, docker-build, docker-smoke]
+    needs: [rust-lint, rust-build-test, docker-pull-smoke, docker-compose-smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
@@ -210,7 +284,7 @@ jobs:
       - name: Download Docker image
         uses: actions/download-artifact@v4.3.0
         with:
-          name: ${{ needs.docker-build.outputs.image-artifact }}
+          name: ${{ env.DOCKER_IMAGE_ARTIFACT }}
           path: /tmp
 
       - name: Load Docker image
