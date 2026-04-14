@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -19,9 +20,20 @@ env:
   DOCKER_IMAGE_NAME: omnifs-ci
   DOCKER_IMAGE_ARTIFACT: omnifs-ci-image
   DOCKER_CACHE_SCOPE: omnifs-image-${{ github.head_ref || github.ref_name }}
+  PR_APPROVAL_LABEL: ci-approved
 
 jobs:
+  pr-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      approved: ${{ steps.gate.outputs.approved }}
+    steps:
+      - id: gate
+        run: echo "approved=${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, env.PR_APPROVAL_LABEL) }}" >> "$GITHUB_OUTPUT"
+
   rust-lint:
+    if: needs.pr-gate.outputs.approved == 'true'
+    needs: pr-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -53,6 +65,8 @@ jobs:
         run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
 
   rust-build-test:
+    if: needs.pr-gate.outputs.approved == 'true'
+    needs: pr-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -111,6 +125,7 @@ jobs:
           compression-level: 0
 
   docker-pull-smoke:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     needs: rust-build-test
     timeout-minutes: 30
@@ -210,6 +225,7 @@ jobs:
         run: docker rm -f omnifs-smoke >/dev/null 2>&1 || true
 
   docker-compose-smoke:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     needs: rust-build-test
     timeout-minutes: 30
