@@ -6,8 +6,8 @@
 use super::{dispatch, enter_cache_only, err, is_unauthorized, with_state};
 use crate::Continuation;
 use crate::api;
-use crate::omnifs::provider::types::*;
 use crate::omnifs::provider::types::DirListing;
+use crate::omnifs::provider::types::*;
 use crate::path::{FsPath, ResourceFile, ResourceKind, RunFile};
 
 pub fn resume_resource(path: &str, result: &SingleEffectResult) -> ProviderResponse {
@@ -229,14 +229,20 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
                 return match &fs_path {
                     Some(FsPath::Comments { .. }) => list_cached_comments(&data),
                     Some(FsPath::CommentFile { idx, .. }) => serve_comment_file(&data, idx),
-                    _ => ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries: vec![], exhaustive: false })),
+                    _ => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                        entries: vec![],
+                        exhaustive: false,
+                    })),
                 };
             }
         }
         if matches!(&fs_path, Some(FsPath::CommentFile { .. })) {
             return err("comment not found in cache");
         }
-        return ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries: vec![], exhaustive: false }));
+        return ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+            entries: vec![],
+            exhaustive: false,
+        }));
     }
     let body = match super::extract_http_body(result) {
         Ok(b) => b,
@@ -268,7 +274,10 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
                     projected_files: None,
                 })
                 .collect();
-            ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: true }))
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries,
+                exhaustive: true,
+            }))
         }
         Some(FsPath::CommentFile { idx, .. }) => serve_comment_file(body, idx),
         _ => err("unexpected comments path"),
@@ -323,5 +332,8 @@ pub fn list_cached_comments(body: &[u8]) -> ProviderResponse {
             projected_files: None,
         })
         .collect();
-    ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: true }))
+    ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+        entries,
+        exhaustive: true,
+    }))
 }

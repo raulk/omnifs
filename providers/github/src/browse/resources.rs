@@ -28,7 +28,11 @@ pub fn resume_cached_repos(
             let mut owners = HashSet::new();
             for repo in repos {
                 // cache_key format: "github.com/owner/repo"
-                if let Some(owner) = repo.cache_key.strip_prefix("github.com/").and_then(|rest| rest.split('/').next()) {
+                if let Some(owner) = repo
+                    .cache_key
+                    .strip_prefix("github.com/")
+                    .and_then(|rest| rest.split('/').next())
+                {
                     owners.insert(owner.to_string());
                 }
             }
@@ -42,7 +46,10 @@ pub fn resume_cached_repos(
                 })
                 .collect();
             entries.sort_by(|a, b| a.name.cmp(&b.name));
-            ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries,
+                exhaustive: false,
+            }))
         }
         super::CachedRepoListMode::Owner => {
             let mut entries: Vec<DirEntry> = repos
@@ -60,7 +67,10 @@ pub fn resume_cached_repos(
                 })
                 .collect();
             entries.sort_by(|a, b| a.name.cmp(&b.name));
-            ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries,
+                exhaustive: false,
+            }))
         }
         super::CachedRepoListMode::ValidateRepo => {
             let Some(FsPath::Repo {
@@ -106,7 +116,10 @@ pub fn resume_owner_profile(
                 let tick = state.cache.current_tick();
                 state.negative_owners.insert(owner.to_string(), tick);
             });
-            return ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries: vec![], exhaustive: true }));
+            return ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![],
+                exhaustive: true,
+            }));
         }
         return dispatch(
             id,
@@ -192,11 +205,7 @@ pub fn resume_owner_profile(
 }
 
 /// Handle repo listing pages (single or batch). Merge results, cache, return entries.
-pub fn resume_repo_pages(
-    _id: u64,
-    path: &str,
-    effect_outcome: &EffectResult,
-) -> ProviderResponse {
+pub fn resume_repo_pages(_id: u64, path: &str, effect_outcome: &EffectResult) -> ProviderResponse {
     let Some(FsPath::Owner { owner }) = FsPath::parse(path) else {
         return err("expected owner path");
     };
@@ -243,7 +252,10 @@ pub fn resume_repo_pages(
             projected_files: None,
         })
         .collect();
-    ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+    ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+        entries,
+        exhaustive: false,
+    }))
 }
 
 /// Handle page 1 of a list response. For search API (issues/PRs), if
@@ -300,7 +312,10 @@ pub fn resume_list_first_page(
                     let tick = state.cache.current_tick();
                     state.negative_owners.insert((*owner).to_string(), tick);
                 });
-                return ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries: vec![], exhaustive: true }));
+                return ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                    entries: vec![],
+                    exhaustive: true,
+                }));
             }
             let api_path = format!("/orgs/{owner}/repos?per_page=100&sort=updated");
             return dispatch(
@@ -341,7 +356,10 @@ pub fn resume_list_first_page(
                     })
                 })
                 .collect();
-            ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries,
+                exhaustive: false,
+            }))
         }
         Some(FsPath::ResourceFilter {
             owner,
@@ -410,7 +428,10 @@ pub fn resume_list_first_page(
                     })
                 })
                 .collect();
-            ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries,
+                exhaustive: false,
+            }))
         }
         _ => err("unexpected list path"),
     }
@@ -471,10 +492,22 @@ fn build_projected_files(item: &serde_json::Value) -> Vec<ProjectedFile> {
         + "\n";
 
     vec![
-        ProjectedFile { name: "title".to_string(), content: title.into_bytes() },
-        ProjectedFile { name: "body".to_string(), content: body.into_bytes() },
-        ProjectedFile { name: "state".to_string(), content: state.into_bytes() },
-        ProjectedFile { name: "user".to_string(), content: user.into_bytes() },
+        ProjectedFile {
+            name: "title".to_string(),
+            content: title.into_bytes(),
+        },
+        ProjectedFile {
+            name: "body".to_string(),
+            content: body.into_bytes(),
+        },
+        ProjectedFile {
+            name: "state".to_string(),
+            content: state.into_bytes(),
+        },
+        ProjectedFile {
+            name: "user".to_string(),
+            content: user.into_bytes(),
+        },
     ]
 }
 
@@ -505,7 +538,10 @@ pub fn finalize_search_results(path: &str, items: &[serde_json::Value]) -> Provi
             })
         })
         .collect();
-    ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+    ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+        entries,
+        exhaustive: false,
+    }))
 }
 
 pub fn finalize_cached_resource_list(
@@ -551,7 +587,10 @@ pub fn finalize_cached_resource_list(
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+    ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+        entries,
+        exhaustive: false,
+    }))
 }
 
 pub fn finalize_cached_runs_list(owner: &str, repo: &str) -> ProviderResponse {
@@ -574,5 +613,8 @@ pub fn finalize_cached_runs_list(owner: &str, repo: &str) -> ProviderResponse {
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    ProviderResponse::Done(ActionResult::DirEntries(DirListing { entries, exhaustive: false }))
+    ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+        entries,
+        exhaustive: false,
+    }))
 }

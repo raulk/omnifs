@@ -15,9 +15,9 @@ mod browse;
 mod cache;
 pub(crate) mod path;
 
+use hashbrown::HashMap;
 use omnifs::provider::types::*;
 use std::cell::RefCell;
-use hashbrown::HashMap;
 
 type ProviderResult<T> = Result<T, String>;
 

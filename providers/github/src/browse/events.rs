@@ -10,9 +10,9 @@ use crate::omnifs::provider::types::*;
 use crate::path::FsPath;
 
 pub fn timer_tick(id: u64) -> ProviderResponse {
-    let pending_invalidations = with_state(|state| {
-        std::mem::take(&mut state.pending_host_invalidations)
-    }).unwrap_or_default();
+    let pending_invalidations =
+        with_state(|state| std::mem::take(&mut state.pending_host_invalidations))
+            .unwrap_or_default();
 
     let repos = with_state(|state| {
         state.cache.advance_tick();
@@ -39,18 +39,24 @@ pub fn timer_tick(id: u64) -> ProviderResponse {
         .collect();
 
     let invalidation_count = pending_invalidations.len();
-    effects.extend(pending_invalidations.into_iter().map(|prefix| {
-        SingleEffect::CacheInvalidatePrefix(CacheInvalidateRequest { prefix })
-    }));
+    effects.extend(
+        pending_invalidations
+            .into_iter()
+            .map(|prefix| SingleEffect::CacheInvalidatePrefix(CacheInvalidateRequest { prefix })),
+    );
 
     if effects.is_empty() {
         return ProviderResponse::Done(ActionResult::Ok);
     }
 
     match with_state(|state| {
-        state
-            .pending
-            .insert(id, Continuation::FetchingEvents { repos, invalidation_count });
+        state.pending.insert(
+            id,
+            Continuation::FetchingEvents {
+                repos,
+                invalidation_count,
+            },
+        );
     }) {
         Ok(()) => ProviderResponse::Batch(effects),
         Err(e) => err(&e),
@@ -86,7 +92,11 @@ pub fn events_fetch(owner: &str, repo: &str, etag: Option<String>) -> SingleEffe
     })
 }
 
-pub fn resume_events(repos: &[String], invalidation_count: usize, effect_outcome: &EffectResult) -> ProviderResponse {
+pub fn resume_events(
+    repos: &[String],
+    invalidation_count: usize,
+    effect_outcome: &EffectResult,
+) -> ProviderResponse {
     let all_results = match effect_outcome {
         EffectResult::Batch(results) => results,
         EffectResult::Single(result) => std::slice::from_ref(result),
@@ -99,7 +109,9 @@ pub fn resume_events(repos: &[String], invalidation_count: usize, effect_outcome
             level: LogLevel::Warn,
             message: format!(
                 "resume_events: result count mismatch: {} results, {} repos, {} invalidations",
-                all_results.len(), repos.len(), invalidation_count
+                all_results.len(),
+                repos.len(),
+                invalidation_count
             ),
         });
     }
@@ -139,7 +151,9 @@ pub fn resume_events(repos: &[String], invalidation_count: usize, effect_outcome
         invalidation_prefixes.sort();
         invalidation_prefixes.dedup();
         let _ = with_state(|state| {
-            state.pending_host_invalidations.extend(invalidation_prefixes);
+            state
+                .pending_host_invalidations
+                .extend(invalidation_prefixes);
         });
     }
 
@@ -153,7 +167,11 @@ pub fn header_value(headers: &[Header], name: &str) -> Option<String> {
         .map(|header| header.value.clone())
 }
 
-pub fn invalidate_from_event(repo: &str, event: &serde_json::Value, host_prefixes: &mut Vec<String>) {
+pub fn invalidate_from_event(
+    repo: &str,
+    event: &serde_json::Value,
+    host_prefixes: &mut Vec<String>,
+) {
     let Some((owner, name)) = repo.split_once('/') else {
         return;
     };
