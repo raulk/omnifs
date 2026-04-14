@@ -85,31 +85,42 @@ run_smoke_demo() {
     local owner=${OMNIFS_DEMO_OWNER:-raulk}
     local requested_repo=${OMNIFS_DEMO_REPO:-omnifs}
     local repo_root="/github/${owner}"
+    local discovered_repo=""
 
     print -r -- "omnifs smoke demo: /github/${owner}/${requested_repo}"
 
     cd "/github/${owner}"
     ls
 
-    if [[ -d $requested_repo ]]; then
-        cd "$requested_repo"
-        repo_root=$PWD
-    elif [[ -d _issues && -d _prs ]]; then
-        repo_root=$PWD
-    else
-        local discovered_repo=""
+    for _ in {1..15}; do
+        if cd "$requested_repo" 2>/dev/null; then
+            repo_root=$PWD
+            break
+        fi
+
+        if [[ -d _issues && -d _prs ]]; then
+            repo_root=$PWD
+            break
+        fi
+
         local candidate
-        for candidate in *; do
+        for candidate in *(N); do
             if [[ -d $candidate && $candidate != _* ]]; then
                 discovered_repo=$candidate
                 break
             fi
         done
 
-        [[ -n $discovered_repo ]]
-        cd "$discovered_repo"
-        repo_root=$PWD
-    fi
+        if [[ -n $discovered_repo ]]; then
+            cd "$discovered_repo"
+            repo_root=$PWD
+            break
+        fi
+
+        sleep 1
+    done
+
+    [[ -d ${repo_root}/_issues/_open ]]
 
     ls
 
