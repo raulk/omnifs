@@ -1,5 +1,6 @@
 /target
 /providers/target
+/dist
 
 .DS_Store
 .env

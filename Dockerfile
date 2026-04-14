@@ -47,7 +47,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # --- Runtime ---
 
-FROM ubuntu:25.10
+FROM ubuntu:25.10 AS runtime-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -74,13 +74,9 @@ RUN printf '%s\n' \
         'skip_global_compinit=1' \
         >/etc/zsh/zshrc
 
-COPY --from=builder /omnifs /usr/local/bin/
 COPY scripts/demo.sh /tmp/demo.sh
-RUN chmod 0755 /tmp/demo.sh
-
-RUN mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
-COPY --from=providers /src/target/wasm32-wasip1/release/omnifs_provider_github.wasm \
-     /root/.omnifs/plugins/
+RUN chmod 0755 /tmp/demo.sh \
+    && mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
 
 RUN cat > /root/.omnifs/providers/github.toml <<'CONF'
 plugin = "omnifs_provider_github.wasm"
@@ -101,3 +97,14 @@ CONF
 SHELL ["/bin/zsh", "-c"]
 ENV SHELL=/bin/zsh
 WORKDIR /
+
+FROM runtime-base AS runtime-prebuilt
+
+COPY dist/omnifs /usr/local/bin/omnifs
+COPY dist/omnifs_provider_github.wasm /root/.omnifs/plugins/
+
+FROM runtime-base AS runtime
+
+COPY --from=builder /omnifs /usr/local/bin/
+COPY --from=providers /src/target/wasm32-wasip1/release/omnifs_provider_github.wasm \
+     /root/.omnifs/plugins/
