@@ -63,12 +63,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cache_dir,
         } => {
             let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
-            let config_path = config_dir
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".omnifs"));
-            let cache_path = cache_dir
-                .map(PathBuf::from)
-                .unwrap_or_else(|| config_path.join("cache"));
+            let config_path = config_dir.map_or_else(|| home.join(".omnifs"), PathBuf::from);
+            let cache_path = cache_dir.map_or_else(|| config_path.join("cache"), PathBuf::from);
             let plugin_dir = config_path.join("plugins");
             let mount_path = PathBuf::from(&mount_point);
 
@@ -76,7 +72,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             std::fs::create_dir_all(&cache_path)?;
 
             // SAFETY: this runs at process startup before provider runtime tasks are spawned.
-            unsafe { std::env::set_var("OMNIFS_CACHE_DIR", &cache_path) };
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var("OMNIFS_CACHE_DIR", &cache_path);
+            }
 
             // Construct the shared GitCloner early and pass it to all components.
             let cloner = Arc::new(GitCloner::new(cache_path));

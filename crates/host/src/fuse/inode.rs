@@ -10,6 +10,17 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
+// SAFETY: libc::getuid() and libc::getgid() are trivially safe.
+#[allow(unsafe_code)]
+fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+#[allow(unsafe_code)]
+fn current_gid() -> u32 {
+    unsafe { libc::getgid() }
+}
+
 /// Tracks the per-node state keyed by inode number for a provider mount.
 pub(crate) struct NodeEntry {
     pub(crate) mount_name: String,
@@ -63,7 +74,7 @@ impl FuseFs {
         // Use entry API to atomically check-or-insert, avoiding a race where
         // two concurrent lookups for the same (mount, path) allocate different inodes.
         // Use and_modify to update kind/size on existing entries (stale inode fix).
-        let ino = *self
+        *self
             .path_to_inode
             .entry(key)
             .and_modify(|existing_ino| {
@@ -71,7 +82,7 @@ impl FuseFs {
                     entry.kind = kind;
                     entry.size = size;
                     if backing_path.is_some() {
-                        entry.backing_path = backing_path.clone();
+                        entry.backing_path.clone_from(&backing_path);
                     }
                 }
             })
@@ -88,10 +99,10 @@ impl FuseFs {
                     },
                 );
                 ino
-            });
-        ino
+            })
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn dir_attr(&self, ino: u64) -> FileAttr {
         let now = SystemTime::now();
         FileAttr {
@@ -105,14 +116,15 @@ impl FuseFs {
             kind: FileType::Directory,
             perm: 0o555,
             nlink: 2,
-            uid: unsafe { libc::getuid() },
-            gid: unsafe { libc::getgid() },
+            uid: current_uid(),
+            gid: current_gid(),
             rdev: 0,
             blksize: 512,
             flags: 0,
         }
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn file_attr(&self, ino: u64, size: u64) -> FileAttr {
         let now = SystemTime::now();
         FileAttr {
@@ -126,8 +138,8 @@ impl FuseFs {
             kind: FileType::RegularFile,
             perm: 0o444,
             nlink: 1,
-            uid: unsafe { libc::getuid() },
-            gid: unsafe { libc::getgid() },
+            uid: current_uid(),
+            gid: current_gid(),
             rdev: 0,
             blksize: 512,
             flags: 0,
@@ -135,6 +147,7 @@ impl FuseFs {
     }
 
     /// Build a `FileAttr` from real filesystem metadata.
+    #[allow(clippy::unused_self)]
     pub(crate) fn attr_from_metadata(&self, ino: u64, meta: &std::fs::Metadata) -> FileAttr {
         let kind = if meta.is_dir() {
             FileType::Directory
@@ -158,9 +171,8 @@ impl FuseFs {
             kind,
             perm,
             nlink,
-            // SAFETY: libc::getuid() and libc::getgid() are trivially safe.
-            uid: unsafe { libc::getuid() },
-            gid: unsafe { libc::getgid() },
+            uid: current_uid(),
+            gid: current_gid(),
             rdev: 0,
             blksize: 512,
             flags: 0,

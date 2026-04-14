@@ -6,15 +6,21 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DOCKER_IMAGE_NAME: omnifs-ci
+  DOCKER_CACHE_SCOPE: omnifs-image-${{ github.head_ref || github.ref_name }}
 
 jobs:
-  check:
+  rust-build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -34,7 +40,14 @@ jobs:
           cache-on-failure: true
 
       - name: Install cargo-component
-        run: cargo install cargo-component --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-component
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -53,28 +66,85 @@ jobs:
           done
 
       - name: Run core tests
-        run: cargo test -p omnifs-cli -p omnifs-host
+        run: cargo nextest run --release -p omnifs-cli -p omnifs-host
 
-  docker-smoke:
+      - name: Build CLI release binary
+        run: cargo build --release -p omnifs-cli
+
+      - name: Stage runtime artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/omnifs dist/omnifs
+          cp target/wasm32-wasip1/release/omnifs_provider_github.wasm dist/omnifs_provider_github.wasm
+
+      - name: Upload runtime artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: omnifs-runtime-artifacts
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+
+  docker-build:
     runs-on: ubuntu-latest
-    needs: check
+    needs: rust-build-and-test
     timeout-minutes: 30
+    outputs:
+      image-artifact: omnifs-ci-image
     steps:
       - uses: actions/checkout@v6.0.2
+
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: omnifs-runtime-artifacts
+          path: dist
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.0.0
 
       - name: Build Docker image
+        id: docker-build
+        continue-on-error: true
         uses: docker/build-push-action@v7.1.0
         with:
           context: .
           file: ./Dockerfile
-          load: true
+          target: runtime-prebuilt
           pull: true
-          tags: omnifs-ci:latest
-          cache-from: type=gha,scope=docker-smoke
-          cache-to: type=gha,mode=max,scope=docker-smoke
+          outputs: type=docker,dest=/tmp/omnifs-ci.tar
+          tags: ${{ env.DOCKER_IMAGE_NAME }}:latest
+          cache-from: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }},mode=max,ignore-error=true
+          github-token: ${{ github.token }}
+
+      - name: Upload Docker image
+        if: steps.docker-build.outcome == 'success'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: omnifs-ci-image
+          path: /tmp/omnifs-ci.tar
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Fail if Docker build failed
+        if: steps.docker-build.outcome != 'success'
+        run: exit 1
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    timeout-minutes: 30
+    steps:
+      - name: Download Docker image
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: ${{ needs.docker-build.outputs.image-artifact }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/omnifs-ci.tar
 
       - name: Start omnifs container
         env:
@@ -89,7 +159,7 @@ jobs:
             --security-opt apparmor:unconfined \
             -e GITHUB_TOKEN="$GITHUB_TOKEN" \
             -e GIT_SSH_COMMAND='ssh -F /dev/null -o StrictHostKeyChecking=accept-new' \
-            omnifs-ci:latest \
+            ${{ env.DOCKER_IMAGE_NAME }}:latest \
             bash -lc 'RUST_LOG=info exec omnifs mount --mount-point /github --config-dir /root/.omnifs --cache-dir /tmp/omnifs-cache >/tmp/omnifs.log 2>&1'
 
           for _ in $(seq 1 60); do
@@ -98,6 +168,7 @@ jobs:
             fi
 
             if ! docker ps --format '{{.Names}}' | grep -qx omnifs-smoke; then
+              docker logs omnifs-smoke >&2 || true
               docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' >&2 || true
               exit 1
             fi
@@ -105,17 +176,24 @@ jobs:
             sleep 1
           done
 
+          docker logs omnifs-smoke >&2 || true
           docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' >&2 || true
           exit 1
 
       - name: Run demo smoke script
         run: |
           set -euo pipefail
-          docker exec omnifs-smoke env OMNIFS_DEMO_MODE=smoke /tmp/demo.sh
+          docker exec omnifs-smoke env \
+            OMNIFS_DEMO_MODE=smoke \
+            OMNIFS_DEMO_OWNER=ollama \
+            OMNIFS_DEMO_REPO=ollama \
+            /tmp/demo.sh
 
       - name: Dump omnifs log on failure
         if: failure()
-        run: docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' || true
+        run: |
+          docker logs omnifs-smoke || true
+          docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' || true
 
       - name: Clean up container
         if: always()
@@ -123,16 +201,20 @@ jobs:
 
   docker-publish:
     runs-on: ubuntu-latest
-    needs: docker-smoke
+    needs: [rust-build-and-test, docker-build, docker-smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6.0.2
+      - name: Download Docker image
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: ${{ needs.docker-build.outputs.image-artifact }}
+          path: /tmp
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.0.0
+      - name: Load Docker image
+        run: docker load -i /tmp/omnifs-ci.tar
 
       - name: Log in to GHCR
         uses: docker/login-action@v4.1.0
@@ -151,14 +233,11 @@ jobs:
             type=ref,event=branch
             type=sha,prefix=sha-
 
-      - name: Build and publish Docker image
-        uses: docker/build-push-action@v7.1.0
-        with:
-          context: .
-          file: ./Dockerfile
-          pull: true
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=docker-publish
-          cache-to: type=gha,mode=max,scope=docker-publish
+      - name: Publish Docker image
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker tag ${{ env.DOCKER_IMAGE_NAME }}:latest "$tag"
+            docker push "$tag"
+          done <<< "${{ steps.meta.outputs.tags }}"

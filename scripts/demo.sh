@@ -83,38 +83,60 @@ run_smoke_demo() {
     set -euo pipefail
 
     local owner=${OMNIFS_DEMO_OWNER:-raulk}
-    local repo=${OMNIFS_DEMO_REPO:-omnifs}
+    local requested_repo=${OMNIFS_DEMO_REPO:-omnifs}
+    local owner_root="/github/${owner}"
+    local requested_repo_root="${owner_root}/${requested_repo}"
+    local repo_root=""
 
-    print -r -- "omnifs smoke demo: /github/${owner}/${repo}"
+    print -r -- "omnifs smoke demo: ${requested_repo_root}"
 
-    cd "/github/${owner}"
+    for _ in {1..30}; do
+        if cd "${requested_repo_root}" 2>/dev/null; then
+            repo_root=$PWD
+            break
+        fi
+
+        if [[ -d ${requested_repo_root}/_issues/_open && -d ${requested_repo_root}/_prs/_open ]]; then
+            repo_root=${requested_repo_root}
+            break
+        fi
+
+        if [[ -d ${owner_root}/_issues/_open && -d ${owner_root}/_prs/_open ]]; then
+            repo_root=${owner_root}
+            break
+        fi
+
+        sleep 1
+    done
+
+    [[ -n ${repo_root} ]]
+    [[ -d ${repo_root}/_issues/_open ]]
+
+    cd "${repo_root}"
     ls
 
-    cd "$repo"
-    ls
-
-    cd _issues/_open
+    cd "${repo_root}/_issues/_open"
     ls
     local first_issue
-    first_issue=$(ls | head -n 1)
+    first_issue=$(command ls -1 | head -n 1)
     [[ -n $first_issue ]]
     cd "$first_issue"
     bat title
     [[ -f body ]] && bat -l md body
 
-    cd ../../_prs/_open
+    cd "${repo_root}/_prs/_open"
     ls
     local first_pr
-    first_pr=$(ls | head -n 1)
+    first_pr=$(command ls -1 | head -n 1)
     [[ -n $first_pr ]]
     cd "$first_pr"
     bat title
     bat state
 
-    if cd ../../_actions/runs 2>/dev/null; then
+    if cd "${repo_root}/_actions/runs" 2>/dev/null; then
         ls
         local first_run
-        first_run=$(ls | head -n 1)
+        first_run=$(command ls -1 | head -n 1)
         if [[ -n $first_run ]]; then
             cd "$first_run"
             [[ -f status ]] && bat status
