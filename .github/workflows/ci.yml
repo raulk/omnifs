@@ -193,6 +193,7 @@ jobs:
             fi
 
             if ! docker ps --format '{{.Names}}' | grep -qx omnifs-smoke; then
+              docker logs omnifs-smoke >&2 || true
               docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' >&2 || true
               exit 1
             fi
@@ -200,6 +201,7 @@ jobs:
             sleep 1
           done
 
+          docker logs omnifs-smoke >&2 || true
           docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' >&2 || true
           exit 1
 
@@ -210,7 +212,9 @@ jobs:
 
       - name: Dump omnifs log on failure
         if: failure()
-        run: docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' || true
+        run: |
+          docker logs omnifs-smoke || true
+          docker exec omnifs-smoke sh -lc 'cat /tmp/omnifs.log' || true
 
       - name: Clean up container
         if: always()

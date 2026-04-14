@@ -102,9 +102,11 @@ FROM runtime-base AS runtime-prebuilt
 
 COPY dist/omnifs /usr/local/bin/omnifs
 COPY dist/omnifs_provider_github.wasm /root/.omnifs/plugins/
+RUN chmod 0755 /usr/local/bin/omnifs
 
 FROM runtime-base AS runtime
 
 COPY --from=builder /omnifs /usr/local/bin/
 COPY --from=providers /src/target/wasm32-wasip1/release/omnifs_provider_github.wasm \
      /root/.omnifs/plugins/
+RUN chmod 0755 /usr/local/bin/omnifs
