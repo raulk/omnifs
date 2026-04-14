@@ -21,7 +21,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM toolchain AS deps
 WORKDIR /src
 COPY --from=planner /src/recipe.json recipe.json
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     cargo chef cook --release --recipe-path recipe.json
 
@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM toolchain AS providers
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo component build \
         --manifest-path providers/github/Cargo.toml \
         --release --target-dir /src/target
@@ -40,7 +40,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM deps AS builder
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     cargo build --release -p omnifs-cli \
     && cp /src/target/release/omnifs /omnifs
