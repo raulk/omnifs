@@ -11,6 +11,8 @@ omnifs mirrors the entire world into your local filesystem. GitHub repos, Huggin
 
 Plan 9 was right, just 40 years early. Everything is a file. The world moved to APIs; omnifs moves it back to paths, for humans and agents alike.
 
+> _🚧 very alpha!_
+
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">
 </p>
