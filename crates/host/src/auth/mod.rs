@@ -116,11 +116,13 @@ impl AuthManager {
 
 fn read_credential(config: &AuthConfig) -> CredentialSetting {
     if let Some(path) = config.token_file.as_deref() {
-        let token = std::fs::read_to_string(path)
+        let token_from_file = std::fs::read_to_string(path)
             .ok()
             .map(|contents| contents.trim().to_string())
             .filter(|contents| !contents.is_empty());
-        return CredentialSetting::Configured(token);
+        if token_from_file.is_some() {
+            return CredentialSetting::Configured(token_from_file);
+        }
     }
 
     match config.token_env.as_deref() {

@@ -85,3 +85,22 @@ fn test_token_file_takes_precedence_over_env() {
     assert_eq!(headers[0].1, "Bearer ghp_from_file");
     unsafe { std::env::remove_var("OMNIFS_TEST_TOKEN_AUTH_PREFERRED") };
 }
+
+#[test]
+fn test_missing_token_file_falls_back_to_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_token_file = dir.path().join("missing_token");
+    let auth = AuthConfig {
+        auth_type: "bearer-token".to_string(),
+        token_env: Some("OMNIFS_TEST_TOKEN_AUTH_FALLBACK".to_string()),
+        token_file: Some(missing_token_file.display().to_string()),
+        domain: None,
+        header: None,
+        scopes: None,
+    };
+    unsafe { std::env::set_var("OMNIFS_TEST_TOKEN_AUTH_FALLBACK", "ghp_from_env") };
+    let manager = AuthManager::from_config(&auth).unwrap();
+    let headers = manager.headers_for_url("https://api.github.com/repos");
+    assert_eq!(headers[0].1, "Bearer ghp_from_env");
+    unsafe { std::env::remove_var("OMNIFS_TEST_TOKEN_AUTH_FALLBACK") };
+}
