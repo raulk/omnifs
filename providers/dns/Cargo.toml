@@ -12,7 +12,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 wit-bindgen = "0.41"
-hashbrown = "0.15"
+hashbrown = { version = "0.15", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

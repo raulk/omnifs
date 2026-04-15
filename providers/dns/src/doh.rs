@@ -21,7 +21,6 @@ const GOOGLE_DOH: &str = "https://dns.google/resolve";
 #[derive(Debug, Clone)]
 pub(crate) struct ResolverConfig {
     pub default_name: String,
-    /// Name -> `DoH` endpoint URL.
     pub resolvers: Vec<ResolverEntry>,
 }
 
@@ -32,59 +31,64 @@ pub(crate) struct ResolverEntry {
     pub aliases: Vec<String>,
 }
 
+/// Serde binding for the TOML config.
+#[derive(serde::Deserialize)]
+#[serde(default)]
+struct RawConfig {
+    default_resolver: String,
+    #[serde(default)]
+    resolvers: hashbrown::HashMap<String, RawResolverEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawResolverEntry {
+    url: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+impl Default for RawConfig {
+    fn default() -> Self {
+        Self {
+            default_resolver: "cloudflare".to_string(),
+            resolvers: hashbrown::HashMap::new(),
+        }
+    }
+}
+
 impl ResolverConfig {
     pub fn from_toml(config_bytes: &[u8]) -> Self {
         let toml_str = std::str::from_utf8(config_bytes).unwrap_or("");
-        let table: toml::Table = toml::from_str(toml_str).unwrap_or_default();
+        let raw: RawConfig = toml::from_str(toml_str).unwrap_or_default();
 
-        let default_name = table
-            .get("default_resolver")
-            .and_then(|v| v.as_str())
-            .unwrap_or("cloudflare")
-            .to_string();
+        let mut resolvers: Vec<ResolverEntry> = raw
+            .resolvers
+            .into_iter()
+            .map(|(name, entry)| ResolverEntry {
+                name,
+                url: entry.url,
+                aliases: entry.aliases,
+            })
+            .collect();
 
-        let mut resolvers = Vec::new();
-
-        if let Some(resolvers_table) = table.get("resolvers").and_then(|v| v.as_table()) {
-            for (name, value) in resolvers_table {
-                if let Some(entry_table) = value.as_table() {
-                    let url = entry_table
-                        .get("url")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let aliases = entry_table
-                        .get("aliases")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    if !url.is_empty() {
-                        resolvers.push(ResolverEntry {
-                            name: name.clone(),
-                            url,
-                            aliases,
-                        });
-                    }
-                }
-            }
+        if resolvers.is_empty() {
+            resolvers = Self::builtin_defaults();
         }
 
-        // If no resolvers in config, use built-in defaults.
-        if resolvers.is_empty() {
-            resolvers.push(ResolverEntry {
+        Self {
+            default_name: raw.default_resolver,
+            resolvers,
+        }
+    }
+
+    fn builtin_defaults() -> Vec<ResolverEntry> {
+        vec![
+            ResolverEntry {
                 name: "cloudflare".to_string(),
                 url: CLOUDFLARE_DOH.to_string(),
-                aliases: vec![
-                    "1.1.1.1".to_string(),
-                    "1.0.0.1".to_string(),
-                ],
-            });
-            resolvers.push(ResolverEntry {
+                aliases: vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()],
+            },
+            ResolverEntry {
                 name: "google".to_string(),
                 url: GOOGLE_DOH.to_string(),
                 aliases: vec![
@@ -92,13 +96,8 @@ impl ResolverConfig {
                     "8.8.4.4".to_string(),
                     "dns.google".to_string(),
                 ],
-            });
-        }
-
-        Self {
-            default_name,
-            resolvers,
-        }
+            },
+        ]
     }
 
     pub fn resolve_endpoint<'a>(&'a self, specifier: Option<&'a str>) -> &'a str {
@@ -169,18 +168,6 @@ pub(crate) fn query(config: &ResolverConfig, resolver: Option<&str>, domain: &st
         }],
         body: None,
     })
-}
-
-pub(crate) fn query_batch(
-    config: &ResolverConfig,
-    resolver: Option<&str>,
-    domain: &str,
-    types: &[RecordType],
-) -> Vec<SingleEffect> {
-    types
-        .iter()
-        .map(|&rt| query(config, resolver, domain, rt))
-        .collect()
 }
 
 pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), String> {

@@ -23,22 +23,17 @@ pub(crate) struct ProviderState {
     pub resolvers: doh::ResolverConfig,
 }
 
+/// Shared context for all continuation variants.
+pub(crate) struct QueryContext {
+    pub resolver: Option<String>,
+    pub domain: String,
+}
+
+#[allow(dead_code)]
 enum Continuation {
-    Single {
-        resolver: Option<String>,
-        domain: String,
-        rtype: RecordType,
-    },
-    All {
-        resolver: Option<String>,
-        domain: String,
-        results: Vec<DnsRecord>,
-        pending_types: Vec<RecordType>,
-    },
-    Raw {
-        resolver: Option<String>,
-        domain: String,
-    },
+    Single { ctx: QueryContext, rtype: RecordType },
+    All { ctx: QueryContext, results: Vec<DnsRecord>, pending_types: Vec<RecordType> },
+    Raw { ctx: QueryContext },
 }
 
 #[derive(Clone, Debug)]
@@ -63,14 +58,12 @@ where
 impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
     fn initialize(config: Vec<u8>) -> ProviderResponse {
         let resolvers = doh::ResolverConfig::from_toml(&config);
-
         STATE.with(|s| {
             *s.borrow_mut() = Some(ProviderState {
                 pending: HashMap::new(),
                 resolvers,
             });
         });
-
         ProviderResponse::Done(ActionResult::ProviderInitialized(ProviderInfo {
             name: "dns-provider".to_string(),
             version: "0.1.0".to_string(),
@@ -79,9 +72,7 @@ impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
     }
 
     fn shutdown() {
-        STATE.with(|s| {
-            *s.borrow_mut() = None;
-        });
+        STATE.with(|s| *s.borrow_mut() = None);
     }
 
     fn get_config_schema() -> ConfigSchema {
@@ -107,8 +98,6 @@ impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
     }
 
     fn capabilities() -> RequestedCapabilities {
-        // Domains are populated dynamically from config in initialize();
-        // at schema-query time we declare the well-known defaults.
         RequestedCapabilities {
             domains: vec![
                 "cloudflare-dns.com".to_string(),
@@ -154,43 +143,29 @@ impl exports::omnifs::provider::resume::Guest for DnsProvider {
     }
 
     fn cancel(id: u64) {
-        let _ = with_state(|state| {
-            state.pending.remove(&id);
-        });
+        let _ = with_state(|s| { s.pending.remove(&id); });
     }
 }
 
+const NOT_IMPL: &str = "not implemented";
+
 impl exports::omnifs::provider::reconcile::Guest for DnsProvider {
     fn plan_mutations(_id: u64, _changes: Vec<FileChange>) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(
-            "mutations are not implemented".to_string(),
-        ))
+        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
     }
-
     fn execute(_id: u64, _mutation: PlannedMutation) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(
-            "mutations are not implemented".to_string(),
-        ))
+        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
     }
-
     fn fetch_resource(_id: u64, _resource_path: String) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(
-            "fetch_resource is not implemented".to_string(),
-        ))
+        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
     }
-
     fn list_scope(_id: u64, _scope: String) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(
-            "list_scope is not implemented".to_string(),
-        ))
+        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
     }
 }
 
 impl exports::omnifs::provider::notify::Guest for DnsProvider {
-    fn on_event(
-        _id: u64,
-        _event: ProviderEvent,
-    ) -> ProviderResponse {
+    fn on_event(_id: u64, _event: ProviderEvent) -> ProviderResponse {
         ProviderResponse::Done(ActionResult::Ok)
     }
 }

@@ -2,7 +2,7 @@ use super::{dir_entry, dispatch, dispatch_batch, err, file_entry, resolver_dir_n
 use crate::doh;
 use crate::omnifs::provider::types::*;
 use crate::path::{FsPath, RecordType};
-use crate::{Continuation, with_state};
+use crate::{Continuation, QueryContext, with_state};
 
 pub fn lookup_child(_id: u64, parent_path: &str, name: &str) -> ProviderResponse {
     let full_path = if parent_path.is_empty() {
@@ -125,85 +125,68 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
 
     match fs_path {
         FsPath::Resolvers => resolvers_content(),
-        FsPath::Record {
-            resolver,
-            domain,
-            rtype,
-        } => read_record(id, resolver, domain, rtype),
-        FsPath::All { resolver, domain } => read_all(id, resolver, domain),
-        FsPath::Raw { resolver, domain } => read_raw(id, resolver, domain),
-        FsPath::ReverseIp { ip } => read_reverse(id, ip),
+        FsPath::Record { resolver, domain, rtype } => {
+            with_query(id, resolver, domain, |ctx, effect_fn| {
+                let effect = effect_fn(ctx.resolver.as_deref(), &ctx.domain, rtype);
+                dispatch(id, Continuation::Single { ctx, rtype }, effect)
+            })
+        }
+        FsPath::All { resolver, domain } => {
+            let types = RecordType::common();
+            with_query(id, resolver, domain, |ctx, batch_fn| {
+                let effects: Vec<SingleEffect> = types
+                    .iter()
+                    .map(|&rt| batch_fn(ctx.resolver.as_deref(), &ctx.domain, rt))
+                    .collect();
+                dispatch_batch(
+                    id,
+                    Continuation::All { ctx, results: Vec::new(), pending_types: types.to_vec() },
+                    effects,
+                )
+            })
+        }
+        FsPath::Raw { resolver, domain } => {
+            with_query(id, resolver, domain, |ctx, effect_fn| {
+                let effect = effect_fn(ctx.resolver.as_deref(), &ctx.domain, RecordType::A);
+                dispatch(id, Continuation::Raw { ctx }, effect)
+            })
+        }
+        FsPath::ReverseIp { ip } => {
+            let effect = match with_state(|s| doh::reverse_query(&s.resolvers, None, ip)) {
+                Ok(e) => e,
+                Err(e) => return err(&e),
+            };
+            dispatch(
+                id,
+                Continuation::Single {
+                    ctx: QueryContext { resolver: None, domain: ip.to_string() },
+                    rtype: RecordType::PTR,
+                },
+                effect,
+            )
+        }
         _ => err("not a file"),
     }
 }
 
-fn read_record(
-    id: u64,
+/// Build a `QueryContext` and call `f` with it and a query function bound to the resolver config.
+fn with_query(
+    _id: u64,
     resolver: Option<&str>,
     domain: &str,
-    rtype: RecordType,
+    f: impl FnOnce(QueryContext, &dyn Fn(Option<&str>, &str, RecordType) -> SingleEffect) -> ProviderResponse,
 ) -> ProviderResponse {
-    let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, rtype)) {
-        Ok(e) => e,
-        Err(e) => return err(&e),
-    };
-    dispatch(
-        id,
-        Continuation::Single {
-            resolver: resolver.map(String::from),
-            domain: domain.to_string(),
-            rtype,
-        },
-        effect,
-    )
-}
-
-fn read_all(id: u64, resolver: Option<&str>, domain: &str) -> ProviderResponse {
-    let types = RecordType::common();
-    let effects = match with_state(|s| doh::query_batch(&s.resolvers, resolver, domain, types)) {
-        Ok(e) => e,
+    let query_fn = match with_state(|s| {
+        s.resolvers.clone()
+    }) {
+        Ok(cfg) => cfg,
         Err(e) => return err(&e),
     };
 
-    dispatch_batch(
-        id,
-        Continuation::All {
-            resolver: resolver.map(String::from),
-            domain: domain.to_string(),
-            results: Vec::new(),
-            pending_types: types.to_vec(),
-        },
-        effects,
-    )
-}
-
-fn read_raw(id: u64, resolver: Option<&str>, domain: &str) -> ProviderResponse {
-    let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A)) {
-        Ok(e) => e,
-        Err(e) => return err(&e),
+    let ctx = QueryContext {
+        resolver: resolver.map(String::from),
+        domain: domain.to_string(),
     };
-    dispatch(
-        id,
-        Continuation::Raw {
-            resolver: resolver.map(String::from),
-            domain: domain.to_string(),
-        },
-        effect,
-    )
-}
 
-fn read_reverse(id: u64, ip: &str) -> ProviderResponse {
-    let effect = match with_state(|s| doh::reverse_query(&s.resolvers, None, ip)) {
-        Ok(e) => e,
-        Err(e) => return err(&e),
-    };
-    dispatch(
-        id,
-        Continuation::Single {
-            resolver: None,
-            domain: ip.to_string(),
-            rtype: RecordType::PTR,
-        },
-        effect,
-    )
+    f(ctx, &|r, d, rt| doh::query(&query_fn, r, d, rt))
 }
