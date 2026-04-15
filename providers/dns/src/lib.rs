@@ -18,21 +18,9 @@ thread_local! {
     static STATE: RefCell<Option<ProviderState>> = const { RefCell::new(None) };
 }
 
-struct ProviderState {
+pub(crate) struct ProviderState {
     pending: HashMap<u64, Continuation>,
-    cache: HashMap<String, CachedResponse>,
-}
-
-struct CachedResponse {
-    records: Vec<DnsRecord>,
-    #[allow(dead_code)] // stored for future cache expiry
-    ttl: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct DnsRecord {
-    pub rtype: RecordType,
-    pub value: String,
+    pub resolvers: doh::ResolverConfig,
 }
 
 enum Continuation {
@@ -53,6 +41,12 @@ enum Continuation {
     },
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DnsRecord {
+    pub rtype: RecordType,
+    pub value: String,
+}
+
 fn with_state<F, R>(f: F) -> Result<R, String>
 where
     F: FnOnce(&mut ProviderState) -> R,
@@ -67,11 +61,13 @@ where
 }
 
 impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
-    fn initialize(_config: Vec<u8>) -> ProviderResponse {
+    fn initialize(config: Vec<u8>) -> ProviderResponse {
+        let resolvers = doh::ResolverConfig::from_toml(&config);
+
         STATE.with(|s| {
             *s.borrow_mut() = Some(ProviderState {
                 pending: HashMap::new(),
-                cache: HashMap::new(),
+                resolvers,
             });
         });
 
@@ -90,17 +86,29 @@ impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
 
     fn get_config_schema() -> ConfigSchema {
         ConfigSchema {
-            fields: vec![ConfigField {
-                name: "default_resolver".to_string(),
-                field_type: "string".to_string(),
-                required: false,
-                default_value: Some("cloudflare".to_string()),
-                description: "Default DoH resolver: cloudflare, google, or a URL".to_string(),
-            }],
+            fields: vec![
+                ConfigField {
+                    name: "default_resolver".to_string(),
+                    field_type: "string".to_string(),
+                    required: false,
+                    default_value: Some("cloudflare".to_string()),
+                    description: "Default resolver alias used when no @resolver prefix"
+                        .to_string(),
+                },
+                ConfigField {
+                    name: "resolvers".to_string(),
+                    field_type: "table".to_string(),
+                    required: false,
+                    default_value: None,
+                    description: "Named resolver aliases mapping to DoH endpoint URLs".to_string(),
+                },
+            ],
         }
     }
 
     fn capabilities() -> RequestedCapabilities {
+        // Domains are populated dynamically from config in initialize();
+        // at schema-query time we declare the well-known defaults.
         RequestedCapabilities {
             domains: vec![
                 "cloudflare-dns.com".to_string(),

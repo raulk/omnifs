@@ -3,7 +3,7 @@ use std::fmt::Write;
 use crate::doh;
 use crate::omnifs::provider::types::*;
 use crate::path::RecordType;
-use crate::{CachedResponse, Continuation, DnsRecord, with_state};
+use crate::{Continuation, DnsRecord, with_state};
 
 mod routing;
 
@@ -45,21 +45,15 @@ pub(crate) fn file_entry(name: &str) -> ProviderResponse {
     })))
 }
 
-/// Check the in-memory cache for a previously resolved record.
-pub(crate) fn cached_content(
-    resolver: Option<&str>,
-    domain: &str,
-    rtype: RecordType,
-) -> Option<ProviderResponse> {
-    let key = cache_key(resolver, domain, rtype);
-    with_state(|state| {
-        state.cache.get(&key).map(|entry| {
-            let content = format_records(&entry.records);
-            ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
-        })
-    })
-    .ok()
-    .flatten()
+/// Format `_resolvers` content from the active config.
+pub(crate) fn resolvers_content() -> ProviderResponse {
+    let content = with_state(|s| s.resolvers.format_resolvers_file()).unwrap_or_default();
+    ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
+}
+
+/// Resolver directory names from config (e.g. `["@cloudflare", "@google"]`).
+pub(crate) fn resolver_dir_names() -> Vec<String> {
+    with_state(|s| s.resolvers.resolver_dir_names()).unwrap_or_default()
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -95,9 +89,9 @@ pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
 }
 
 fn resume_single(
-    resolver: Option<&str>,
-    domain: &str,
-    rtype: RecordType,
+    _resolver: Option<&str>,
+    _domain: &str,
+    _rtype: RecordType,
     outcome: &EffectResult,
 ) -> ProviderResponse {
     let body = match extract_http_body(outcome) {
@@ -106,8 +100,7 @@ fn resume_single(
     };
 
     match doh::parse_response(body) {
-        Ok((records, ttl)) => {
-            cache_records(resolver, domain, rtype, &records, ttl);
+        Ok((records, _ttl)) => {
             let content = format_records(&records);
             ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
         }
@@ -118,10 +111,10 @@ fn resume_single(
 }
 
 fn resume_all(
-    resolver: Option<&str>,
-    domain: &str,
+    _resolver: Option<&str>,
+    _domain: &str,
     mut accumulated: Vec<DnsRecord>,
-    pending_types: &[RecordType],
+    _pending_types: &[RecordType],
     outcome: &EffectResult,
 ) -> ProviderResponse {
     let results: &[SingleEffectResult] = match outcome {
@@ -129,15 +122,12 @@ fn resume_all(
         EffectResult::Single(r) => std::slice::from_ref(r),
     };
 
-    for (i, result) in results.iter().enumerate() {
+    for result in results {
         let body = match result {
             SingleEffectResult::HttpResponse(resp) if resp.status < 400 => &resp.body,
             _ => continue,
         };
-        if let Ok((records, ttl)) = doh::parse_response(body) {
-            if let Some(&rtype) = pending_types.get(i) {
-                cache_records(resolver, domain, rtype, &records, ttl);
-            }
+        if let Ok((records, _ttl)) = doh::parse_response(body) {
             accumulated.extend(records);
         }
     }
@@ -198,32 +188,6 @@ fn extract_http_body(outcome: &EffectResult) -> Result<&[u8], ProviderResponse> 
     }
 }
 
-fn cache_records(
-    resolver: Option<&str>,
-    domain: &str,
-    rtype: RecordType,
-    records: &[DnsRecord],
-    ttl: u64,
-) {
-    let key = cache_key(resolver, domain, rtype);
-    let _ = with_state(|state| {
-        state.cache.insert(
-            key,
-            CachedResponse {
-                records: records.to_vec(),
-                ttl,
-            },
-        );
-    });
-}
-
-fn cache_key(resolver: Option<&str>, domain: &str, rtype: RecordType) -> String {
-    match resolver {
-        Some(r) => format!("@{r}/{domain}/{}", rtype.as_str()),
-        None => format!("{domain}/{}", rtype.as_str()),
-    }
-}
-
 fn format_records(records: &[DnsRecord]) -> String {
     let mut out = String::new();
     for r in records {
@@ -249,8 +213,3 @@ fn format_all_records(records: &[DnsRecord]) -> String {
     }
     out
 }
-
-pub(crate) const KNOWN_RESOLVERS: &str = "\
-cloudflare\t1.1.1.1\thttps://cloudflare-dns.com/dns-query
-google\t8.8.8.8\thttps://dns.google/resolve
-";

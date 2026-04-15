@@ -2737,6 +2737,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "serde",
  "serde_json",
+ "toml 0.8.23",
  "wit-bindgen 0.41.0",
 ]
 

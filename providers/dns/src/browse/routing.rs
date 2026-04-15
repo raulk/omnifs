@@ -1,8 +1,8 @@
-use super::{cached_content, dir_entry, dispatch, dispatch_batch, err, file_entry, KNOWN_RESOLVERS};
+use super::{dir_entry, dispatch, dispatch_batch, err, file_entry, resolver_dir_names, resolvers_content};
 use crate::doh;
 use crate::omnifs::provider::types::*;
 use crate::path::{FsPath, RecordType};
-use crate::Continuation;
+use crate::{Continuation, with_state};
 
 pub fn lookup_child(_id: u64, parent_path: &str, name: &str) -> ProviderResponse {
     let full_path = if parent_path.is_empty() {
@@ -62,7 +62,7 @@ fn list_root() -> ProviderResponse {
         DirEntry {
             name: "_resolvers".to_string(),
             kind: EntryKind::File,
-            size: Some(KNOWN_RESOLVERS.len() as u64),
+            size: None,
             projected_files: None,
         },
         DirEntry {
@@ -73,9 +73,9 @@ fn list_root() -> ProviderResponse {
         },
     ];
 
-    for resolver in &["@cloudflare", "@google"] {
+    for name in resolver_dir_names() {
         entries.push(DirEntry {
-            name: (*resolver).to_string(),
+            name,
             kind: EntryKind::Directory,
             size: None,
             projected_files: None,
@@ -124,9 +124,7 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
     };
 
     match fs_path {
-        FsPath::Resolvers => ProviderResponse::Done(ActionResult::FileContent(
-            KNOWN_RESOLVERS.as_bytes().to_vec(),
-        )),
+        FsPath::Resolvers => resolvers_content(),
         FsPath::Record {
             resolver,
             domain,
@@ -145,10 +143,10 @@ fn read_record(
     domain: &str,
     rtype: RecordType,
 ) -> ProviderResponse {
-    if let Some(resp) = cached_content(resolver, domain, rtype) {
-        return resp;
-    }
-
+    let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, rtype)) {
+        Ok(e) => e,
+        Err(e) => return err(&e),
+    };
     dispatch(
         id,
         Continuation::Single {
@@ -156,13 +154,16 @@ fn read_record(
             domain: domain.to_string(),
             rtype,
         },
-        doh::query(resolver, domain, rtype),
+        effect,
     )
 }
 
 fn read_all(id: u64, resolver: Option<&str>, domain: &str) -> ProviderResponse {
     let types = RecordType::common();
-    let effects = doh::query_batch(resolver, domain, types);
+    let effects = match with_state(|s| doh::query_batch(&s.resolvers, resolver, domain, types)) {
+        Ok(e) => e,
+        Err(e) => return err(&e),
+    };
 
     dispatch_batch(
         id,
@@ -177,17 +178,25 @@ fn read_all(id: u64, resolver: Option<&str>, domain: &str) -> ProviderResponse {
 }
 
 fn read_raw(id: u64, resolver: Option<&str>, domain: &str) -> ProviderResponse {
+    let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A)) {
+        Ok(e) => e,
+        Err(e) => return err(&e),
+    };
     dispatch(
         id,
         Continuation::Raw {
             resolver: resolver.map(String::from),
             domain: domain.to_string(),
         },
-        doh::query(resolver, domain, RecordType::A),
+        effect,
     )
 }
 
 fn read_reverse(id: u64, ip: &str) -> ProviderResponse {
+    let effect = match with_state(|s| doh::reverse_query(&s.resolvers, None, ip)) {
+        Ok(e) => e,
+        Err(e) => return err(&e),
+    };
     dispatch(
         id,
         Continuation::Single {
@@ -195,6 +204,6 @@ fn read_reverse(id: u64, ip: &str) -> ProviderResponse {
             domain: ip.to_string(),
             rtype: RecordType::PTR,
         },
-        doh::reverse_query(None, ip),
+        effect,
     )
 }
