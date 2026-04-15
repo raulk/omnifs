@@ -1,4 +1,5 @@
-use super::{dir_entry, dispatch, dispatch_batch, err, file_entry, resolver_dir_names, resolvers_content};
+use super::{dir_entry, dispatch, dispatch_batch, err, file_entry, mk_dir, mk_file};
+use super::{resolver_dir_names, resolvers_content};
 use crate::doh;
 use crate::omnifs::provider::types::*;
 use crate::path::{FsPath, RecordType};
@@ -42,46 +43,22 @@ pub fn list_children(_id: u64, path: &str) -> ProviderResponse {
                 exhaustive: false,
             }))
         }
-        FsPath::ReverseIp { .. } => {
-            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
-                entries: vec![DirEntry {
-                    name: "PTR".to_string(),
-                    kind: EntryKind::File,
-                    size: Some(4096),
-                    projected_files: None,
-                }],
-                exhaustive: true,
-            }))
-        }
+        FsPath::ReverseIp { .. } => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+            entries: vec![mk_file("PTR")],
+            exhaustive: true,
+        })),
         _ => err("not a directory"),
     }
 }
 
 fn list_root() -> ProviderResponse {
     let mut entries = vec![
-        DirEntry {
-            name: "_resolvers".to_string(),
-            kind: EntryKind::File,
-            size: None,
-            projected_files: None,
-        },
-        DirEntry {
-            name: "_reverse".to_string(),
-            kind: EntryKind::Directory,
-            size: None,
-            projected_files: None,
-        },
+        mk_file("_resolvers"),
+        mk_dir("_reverse"),
     ];
-
     for name in resolver_dir_names() {
-        entries.push(DirEntry {
-            name,
-            kind: EntryKind::Directory,
-            size: None,
-            projected_files: None,
-        });
+        entries.push(mk_dir(name));
     }
-
     ProviderResponse::Done(ActionResult::DirEntries(DirListing {
         entries,
         exhaustive: false,
@@ -91,27 +68,10 @@ fn list_root() -> ProviderResponse {
 fn list_domain() -> ProviderResponse {
     let mut entries: Vec<DirEntry> = RecordType::all()
         .iter()
-        .map(|rt| DirEntry {
-            name: rt.as_str().to_string(),
-            kind: EntryKind::File,
-            size: Some(4096),
-            projected_files: None,
-        })
+        .map(|rt| mk_file(rt.as_str()))
         .collect();
-
-    entries.push(DirEntry {
-        name: "_all".to_string(),
-        kind: EntryKind::File,
-        size: Some(4096),
-        projected_files: None,
-    });
-    entries.push(DirEntry {
-        name: "_raw".to_string(),
-        kind: EntryKind::File,
-        size: Some(4096),
-        projected_files: None,
-    });
-
+    entries.push(mk_file("_all"));
+    entries.push(mk_file("_raw"));
     ProviderResponse::Done(ActionResult::DirEntries(DirListing {
         entries,
         exhaustive: true,
@@ -126,67 +86,51 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
     match fs_path {
         FsPath::Resolvers => resolvers_content(),
         FsPath::Record { resolver, domain, rtype } => {
-            with_query(id, resolver, domain, |ctx, effect_fn| {
-                let effect = effect_fn(ctx.resolver.as_deref(), &ctx.domain, rtype);
-                dispatch(id, Continuation::Single { ctx, rtype }, effect)
-            })
+            let ctx = mk_ctx(resolver, domain);
+            let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, rtype)) {
+                Ok(e) => e,
+                Err(e) => return err(&e),
+            };
+            dispatch(id, Continuation::Single { ctx, rtype }, effect)
         }
         FsPath::All { resolver, domain } => {
             let types = RecordType::common();
-            with_query(id, resolver, domain, |ctx, batch_fn| {
-                let effects: Vec<SingleEffect> = types
-                    .iter()
-                    .map(|&rt| batch_fn(ctx.resolver.as_deref(), &ctx.domain, rt))
-                    .collect();
-                dispatch_batch(
-                    id,
-                    Continuation::All { ctx, results: Vec::new(), pending_types: types.to_vec() },
-                    effects,
-                )
-            })
+            let ctx = mk_ctx(resolver, domain);
+            let effects = match with_state(|s| {
+                types.iter().map(|&rt| doh::query(&s.resolvers, resolver, domain, rt)).collect()
+            }) {
+                Ok(e) => e,
+                Err(e) => return err(&e),
+            };
+            dispatch_batch(
+                id,
+                Continuation::All { ctx, results: Vec::new(), pending_types: types.to_vec() },
+                effects,
+            )
         }
         FsPath::Raw { resolver, domain } => {
-            with_query(id, resolver, domain, |ctx, effect_fn| {
-                let effect = effect_fn(ctx.resolver.as_deref(), &ctx.domain, RecordType::A);
-                dispatch(id, Continuation::Raw { ctx }, effect)
-            })
+            let ctx = mk_ctx(resolver, domain);
+            let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A)) {
+                Ok(e) => e,
+                Err(e) => return err(&e),
+            };
+            dispatch(id, Continuation::Raw { ctx }, effect)
         }
         FsPath::ReverseIp { ip } => {
             let effect = match with_state(|s| doh::reverse_query(&s.resolvers, None, ip)) {
                 Ok(e) => e,
                 Err(e) => return err(&e),
             };
-            dispatch(
-                id,
-                Continuation::Single {
-                    ctx: QueryContext { resolver: None, domain: ip.to_string() },
-                    rtype: RecordType::PTR,
-                },
-                effect,
-            )
+            let ctx = QueryContext { resolver: None, domain: ip.to_string() };
+            dispatch(id, Continuation::Single { ctx, rtype: RecordType::PTR }, effect)
         }
         _ => err("not a file"),
     }
 }
 
-/// Build a `QueryContext` and call `f` with it and a query function bound to the resolver config.
-fn with_query(
-    _id: u64,
-    resolver: Option<&str>,
-    domain: &str,
-    f: impl FnOnce(QueryContext, &dyn Fn(Option<&str>, &str, RecordType) -> SingleEffect) -> ProviderResponse,
-) -> ProviderResponse {
-    let query_fn = match with_state(|s| {
-        s.resolvers.clone()
-    }) {
-        Ok(cfg) => cfg,
-        Err(e) => return err(&e),
-    };
-
-    let ctx = QueryContext {
+fn mk_ctx(resolver: Option<&str>, domain: &str) -> QueryContext {
+    QueryContext {
         resolver: resolver.map(String::from),
         domain: domain.to_string(),
-    };
-
-    f(ctx, &|r, d, rt| doh::query(&query_fn, r, d, rt))
+    }
 }

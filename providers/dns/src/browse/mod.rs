@@ -26,22 +26,20 @@ pub(crate) fn dispatch_batch(
         .map_or_else(|e| err(&e), |_| ProviderResponse::Batch(effects))
 }
 
+pub(crate) fn mk_dir(name: impl Into<String>) -> DirEntry {
+    DirEntry { name: name.into(), kind: EntryKind::Directory, size: None, projected_files: None }
+}
+
+pub(crate) fn mk_file(name: impl Into<String>) -> DirEntry {
+    DirEntry { name: name.into(), kind: EntryKind::File, size: Some(4096), projected_files: None }
+}
+
 pub(crate) fn dir_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-        name: name.to_string(),
-        kind: EntryKind::Directory,
-        size: None,
-        projected_files: None,
-    })))
+    ProviderResponse::Done(ActionResult::DirEntryOption(Some(mk_dir(name))))
 }
 
 pub(crate) fn file_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-        name: name.to_string(),
-        kind: EntryKind::File,
-        size: Some(4096),
-        projected_files: None,
-    })))
+    ProviderResponse::Done(ActionResult::DirEntryOption(Some(mk_file(name))))
 }
 
 pub(crate) fn resolvers_content() -> ProviderResponse {

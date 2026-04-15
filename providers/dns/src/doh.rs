@@ -170,61 +170,53 @@ pub(crate) fn query(config: &ResolverConfig, resolver: Option<&str>, domain: &st
     })
 }
 
+/// `DoH` JSON response (RFC 8484 / Cloudflare/Google convention).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DohResponse {
+    status: u64,
+    #[serde(default)]
+    answer: Vec<DohAnswer>,
+}
+
+#[derive(serde::Deserialize)]
+struct DohAnswer {
+    #[serde(rename = "type", default)]
+    rtype: u16,
+    #[serde(rename = "TTL", default = "default_ttl")]
+    ttl: u64,
+    #[serde(default)]
+    data: String,
+}
+
+fn default_ttl() -> u64 { 300 }
+
 pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), String> {
-    let json: serde_json::Value =
+    let resp: DohResponse =
         serde_json::from_slice(body).map_err(|e| format!("invalid DoH JSON: {e}"))?;
 
-    let status = json
-        .get("Status")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    if status != 0 {
-        let status_name = match status {
+    if resp.status != 0 {
+        let name = match resp.status {
             1 => "FORMERR",
             2 => "SERVFAIL",
             3 => "NXDOMAIN",
             5 => "REFUSED",
             _ => "ERROR",
         };
-        return Err(format!("DNS {status_name} (status {status})"));
+        return Err(format!("DNS {name} (status {})", resp.status));
     }
-
-    let empty = Vec::new();
-    let answers = json
-        .get("Answer")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty);
 
     let mut min_ttl = u64::MAX;
     let mut records = Vec::new();
 
-    for answer in answers {
-        #[allow(clippy::cast_possible_truncation)]
-        let type_num = answer
-            .get("type")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as u16;
-        let data = answer
-            .get("data")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let ttl = answer
-            .get("TTL")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(300);
-        min_ttl = min_ttl.min(ttl);
-
-        if let Some(rtype) = type_num_to_record(type_num) {
-            records.push(crate::DnsRecord { rtype, value: data });
+    for a in &resp.answer {
+        min_ttl = min_ttl.min(a.ttl);
+        if let Some(rtype) = RecordType::from_wire(a.rtype) {
+            records.push(crate::DnsRecord { rtype, value: a.data.clone() });
         }
     }
 
-    if min_ttl == u64::MAX {
-        min_ttl = 300;
-    }
-
-    Ok((records, min_ttl))
+    Ok((records, if min_ttl == u64::MAX { 300 } else { min_ttl }))
 }
 
 pub(crate) fn reverse_query(config: &ResolverConfig, resolver: Option<&str>, ip: &str) -> SingleEffect {
@@ -299,22 +291,6 @@ fn expand_ipv6(ip: &str) -> String {
         let _ = write!(out, "{p:0>4}");
     }
     out
-}
-
-fn type_num_to_record(num: u16) -> Option<RecordType> {
-    match num {
-        1 => Some(RecordType::A),
-        28 => Some(RecordType::AAAA),
-        5 => Some(RecordType::CNAME),
-        15 => Some(RecordType::MX),
-        2 => Some(RecordType::NS),
-        16 => Some(RecordType::TXT),
-        6 => Some(RecordType::SOA),
-        33 => Some(RecordType::SRV),
-        257 => Some(RecordType::CAA),
-        12 => Some(RecordType::PTR),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

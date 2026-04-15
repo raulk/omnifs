@@ -73,6 +73,22 @@ impl RecordType {
             Self::SOA,
         ]
     }
+
+    pub fn from_wire(num: u16) -> Option<Self> {
+        match num {
+            1 => Some(Self::A),
+            2 => Some(Self::NS),
+            5 => Some(Self::CNAME),
+            6 => Some(Self::SOA),
+            12 => Some(Self::PTR),
+            15 => Some(Self::MX),
+            16 => Some(Self::TXT),
+            28 => Some(Self::AAAA),
+            33 => Some(Self::SRV),
+            257 => Some(Self::CAA),
+            _ => None,
+        }
+    }
 }
 
 /// Parsed path within the DNS provider. Max depth is 3 segments.

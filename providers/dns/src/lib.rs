@@ -23,8 +23,8 @@ pub(crate) struct ProviderState {
     pub resolvers: doh::ResolverConfig,
 }
 
-/// Shared context for all continuation variants.
 pub(crate) struct QueryContext {
+    #[allow(dead_code)]
     pub resolver: Option<String>,
     pub domain: String,
 }
