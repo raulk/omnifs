@@ -2731,6 +2731,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnifs-provider-dns"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.15.5",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "omnifs-provider-github"
 version = "0.1.0"
 dependencies = [
