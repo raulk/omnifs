@@ -211,7 +211,6 @@ fn cache_records(
             key,
             CachedResponse {
                 records: records.to_vec(),
-                cached_at: 0,
                 ttl,
             },
         );

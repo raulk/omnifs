@@ -268,4 +268,14 @@ mod tests {
     fn reject_deep_path() {
         assert!(FsPath::parse("@r/example.com/A/extra").is_none());
     }
+
+    #[test]
+    fn all_covers_all_non_ptr_variants() {
+        // Guard against adding a variant to RecordType without updating all().
+        for rt in RecordType::all() {
+            assert_eq!(RecordType::from_str(rt.as_str()), Some(*rt));
+        }
+        // PTR is intentionally excluded from all() but must still parse.
+        assert_eq!(RecordType::from_str("PTR"), Some(RecordType::PTR));
+    }
 }

@@ -23,10 +23,9 @@ struct ProviderState {
     cache: HashMap<String, CachedResponse>,
 }
 
-#[allow(dead_code)]
 struct CachedResponse {
     records: Vec<DnsRecord>,
-    cached_at: u64,
+    #[allow(dead_code)] // stored for future cache expiry
     ttl: u64,
 }
 
