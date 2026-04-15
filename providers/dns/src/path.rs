@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum RecordType {
@@ -45,8 +47,7 @@ impl RecordType {
         }
     }
 
-    /// PTR excluded: only reachable via `_reverse/<ip>`, not as a
-    /// direct child of a domain directory.
+    /// PTR excluded: it is only used internally for `_reverse/<ip>`.
     pub fn all() -> &'static [Self] {
         &[
             Self::A,
@@ -101,6 +102,10 @@ pub(crate) enum FsPath<'a> {
     ReverseIp {
         ip: &'a str,
     },
+    DirectReverseIp {
+        resolver: Option<&'a str>,
+        ip: &'a str,
+    },
     Resolver {
         resolver: &'a str,
     },
@@ -149,6 +154,13 @@ impl<'a> FsPath<'a> {
             (resolver, None, None) if resolver.starts_with('@') => Some(Self::Resolver {
                 resolver: &resolver[1..],
             }),
+            (resolver, Some(ip), None) if resolver.starts_with('@') && is_ip_addr(ip) => {
+                Some(Self::DirectReverseIp {
+                    resolver: Some(&resolver[1..]),
+                    ip,
+                })
+            }
+            (resolver, Some(ip), Some(_)) if resolver.starts_with('@') && is_ip_addr(ip) => None,
             (resolver, Some(domain), None) if resolver.starts_with('@') => Some(Self::Domain {
                 resolver: Some(&resolver[1..]),
                 domain,
@@ -157,6 +169,10 @@ impl<'a> FsPath<'a> {
                 parse_record_or_anchor(Some(&resolver[1..]), domain, record)
             }
 
+            (ip, None, None) if is_ip_addr(ip) => {
+                Some(Self::DirectReverseIp { resolver: None, ip })
+            }
+            (ip, Some(_), None) if is_ip_addr(ip) => None,
             (domain, None, None) if is_domain_like(domain) => Some(Self::Domain {
                 resolver: None,
                 domain,
@@ -178,6 +194,7 @@ fn parse_record_or_anchor<'a>(
     match name {
         "_all" => Some(FsPath::All { resolver, domain }),
         "_raw" => Some(FsPath::Raw { resolver, domain }),
+        "PTR" => None,
         _ => RecordType::from_str(name).map(|rtype| FsPath::Record {
             resolver,
             domain,
@@ -188,6 +205,10 @@ fn parse_record_or_anchor<'a>(
 
 fn is_domain_like(s: &str) -> bool {
     s.contains('.') && !s.contains(char::is_whitespace) && s.len() <= 253
+}
+
+fn is_ip_addr(s: &str) -> bool {
+    s.parse::<IpAddr>().is_ok()
 }
 
 #[cfg(test)]
@@ -264,7 +285,63 @@ mod tests {
     #[test]
     fn parse_reverse() {
         let p = FsPath::parse("_reverse/93.184.216.34").unwrap();
-        assert!(matches!(p, FsPath::ReverseIp { ip: "93.184.216.34" }));
+        assert!(matches!(
+            p,
+            FsPath::ReverseIp {
+                ip: "93.184.216.34"
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_bare_ipv4_as_direct_reverse() {
+        let p = FsPath::parse("172.217.171.46").unwrap();
+        assert!(matches!(
+            p,
+            FsPath::DirectReverseIp {
+                resolver: None,
+                ip: "172.217.171.46"
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_bare_ipv6_as_direct_reverse() {
+        let p = FsPath::parse("2001:4860:4860::8888").unwrap();
+        assert!(matches!(
+            p,
+            FsPath::DirectReverseIp {
+                resolver: None,
+                ip: "2001:4860:4860::8888"
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_resolver_ipv4_as_direct_reverse() {
+        let p = FsPath::parse("@google/172.217.171.46").unwrap();
+        assert!(matches!(
+            p,
+            FsPath::DirectReverseIp {
+                resolver: Some("google"),
+                ip: "172.217.171.46"
+            }
+        ));
+    }
+
+    #[test]
+    fn reject_bare_ip_record_child() {
+        assert!(FsPath::parse("172.217.171.46/A").is_none());
+    }
+
+    #[test]
+    fn reject_reverse_ptr_child() {
+        assert!(FsPath::parse("_reverse/93.184.216.34/PTR").is_none());
+    }
+
+    #[test]
+    fn reject_direct_ptr_record() {
+        assert!(FsPath::parse("example.com/PTR").is_none());
     }
 
     #[test]
@@ -291,7 +368,7 @@ mod tests {
         for rt in RecordType::all() {
             assert_eq!(RecordType::from_str(rt.as_str()), Some(*rt));
         }
-        // PTR is intentionally excluded from all() but must still parse.
+        // PTR is intentionally excluded from all() but remains available internally.
         assert_eq!(RecordType::from_str("PTR"), Some(RecordType::PTR));
     }
 }

@@ -20,9 +20,8 @@ pub fn lookup_child(_id: u64, parent_path: &str, name: &str) -> ProviderResponse
         FsPath::Root => dir_entry(name),
         FsPath::Resolvers => file_entry("_resolvers"),
         FsPath::ReverseRoot => dir_entry("_reverse"),
-        FsPath::ReverseIp { .. } | FsPath::Resolver { .. } | FsPath::Domain { .. } => {
-            dir_entry(name)
-        }
+        FsPath::ReverseIp { .. } | FsPath::DirectReverseIp { .. } => file_entry(name),
+        FsPath::Resolver { .. } | FsPath::Domain { .. } => dir_entry(name),
         FsPath::Record { .. } => file_entry(name),
         FsPath::All { .. } => file_entry("_all"),
         FsPath::Raw { .. } => file_entry("_raw"),
@@ -43,19 +42,12 @@ pub fn list_children(_id: u64, path: &str) -> ProviderResponse {
                 exhaustive: false,
             }))
         }
-        FsPath::ReverseIp { .. } => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
-            entries: vec![mk_file("PTR")],
-            exhaustive: true,
-        })),
         _ => err("not a directory"),
     }
 }
 
 fn list_root() -> ProviderResponse {
-    let mut entries = vec![
-        mk_file("_resolvers"),
-        mk_dir("_reverse"),
-    ];
+    let mut entries = vec![mk_file("_resolvers"), mk_dir("_reverse")];
     for name in resolver_dir_names() {
         entries.push(mk_dir(name));
     }
@@ -85,7 +77,11 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
 
     match fs_path {
         FsPath::Resolvers => resolvers_content(),
-        FsPath::Record { resolver, domain, rtype } => {
+        FsPath::Record {
+            resolver,
+            domain,
+            rtype,
+        } => {
             let ctx = mk_ctx(resolver, domain);
             let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, rtype)) {
                 Ok(e) => e,
@@ -97,40 +93,89 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
             let types = RecordType::common();
             let ctx = mk_ctx(resolver, domain);
             let effects = match with_state(|s| {
-                types.iter().map(|&rt| doh::query(&s.resolvers, resolver, domain, rt)).collect()
+                types
+                    .iter()
+                    .map(|&rt| doh::query(&s.resolvers, resolver, domain, rt))
+                    .collect()
             }) {
                 Ok(e) => e,
                 Err(e) => return err(&e),
             };
             dispatch_batch(
                 id,
-                Continuation::All { ctx, results: Vec::new(), pending_types: types.to_vec() },
+                Continuation::All {
+                    ctx,
+                    results: Vec::new(),
+                    pending_types: types.to_vec(),
+                },
                 effects,
             )
         }
         FsPath::Raw { resolver, domain } => {
             let ctx = mk_ctx(resolver, domain);
-            let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A)) {
-                Ok(e) => e,
-                Err(e) => return err(&e),
-            };
+            let effect =
+                match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A)) {
+                    Ok(e) => e,
+                    Err(e) => return err(&e),
+                };
             dispatch(id, Continuation::Raw { ctx }, effect)
         }
-        FsPath::ReverseIp { ip } => {
-            let effect = match with_state(|s| doh::reverse_query(&s.resolvers, None, ip)) {
-                Ok(e) => e,
-                Err(e) => return err(&e),
-            };
-            let ctx = QueryContext { resolver: None, domain: ip.to_string() };
-            dispatch(id, Continuation::Single { ctx, rtype: RecordType::PTR }, effect)
-        }
+        FsPath::ReverseIp { ip } => read_reverse_ip(id, None, ip),
+        FsPath::DirectReverseIp { resolver, ip } => read_reverse_ip(id, resolver, ip),
         _ => err("not a file"),
     }
+}
+
+fn read_reverse_ip(id: u64, resolver: Option<&str>, ip: &str) -> ProviderResponse {
+    let effect = match with_state(|s| doh::reverse_query(&s.resolvers, resolver, ip))
+        .and_then(|result| result)
+    {
+        Ok(effect) => effect,
+        Err(e) => return err(&e),
+    };
+    let ctx = QueryContext {
+        resolver: resolver.map(String::from),
+        domain: ip.to_string(),
+    };
+    dispatch(
+        id,
+        Continuation::Single {
+            ctx,
+            rtype: RecordType::PTR,
+        },
+        effect,
+    )
 }
 
 fn mk_ctx(resolver: Option<&str>, domain: &str) -> QueryContext {
     QueryContext {
         resolver: resolver.map(String::from),
         domain: domain.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_bare_ip_returns_file_entry() {
+        let response = lookup_child(1, "", "172.217.171.46");
+        let ProviderResponse::Done(ActionResult::DirEntryOption(Some(entry))) = response else {
+            panic!("expected file entry");
+        };
+
+        assert_eq!(entry.name, "172.217.171.46");
+        assert_eq!(entry.kind, EntryKind::File);
+    }
+
+    #[test]
+    fn list_bare_ip_returns_not_a_directory() {
+        let response = list_children(1, "172.217.171.46");
+        let ProviderResponse::Done(ActionResult::Err(message)) = response else {
+            panic!("expected error");
+        };
+
+        assert_eq!(message, "not a directory");
     }
 }

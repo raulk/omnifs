@@ -84,6 +84,10 @@ ls
 cd /github/ollama/ollama/_issues/_open
 ls
 
+# query DNS records
+cd /dns/example.com
+cat A
+
 # poke around!
 ```
 

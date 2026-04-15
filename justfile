@@ -8,9 +8,9 @@ check: build-providers
     just check-providers
 
 check-providers:
-    cargo check -p omnifs-provider-github -p test-provider --target wasm32-wasip1
-    cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
-    cargo test -p omnifs-provider-github -p test-provider --target wasm32-wasip1 --no-run
+    cargo check -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip1
+    cargo clippy -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip1 -- -D warnings
+    cargo test -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip1 --no-run
 
 build-providers:
     #!/usr/bin/env bash
@@ -28,6 +28,17 @@ test-integration: build-providers
 
 build:
     docker build -t {{image}} .
+
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p .secrets
+    if [[ ! -s .secrets/github_token ]]; then
+      umask 077
+      gh auth token > .secrets/github_token
+    fi
+    export GITHUB_TOKEN_FILE="$(pwd)/.secrets/github_token"
+    docker compose up --build -d
 
 start:
     #!/usr/bin/env bash
@@ -47,7 +58,7 @@ start:
       -v "$(pwd)/scripts/demo.sh:/tmp/demo.sh:ro" \
       {{image}}
     for _ in $(seq 1 60); do
-      if docker exec {{container}} sh -lc "grep -qs ' /github ' /proc/mounts"; then
+      if docker exec {{container}} sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
         exit 0
       fi
       if ! docker ps --format '{{"{{.Names}}"}}' | grep -qx {{container}}; then

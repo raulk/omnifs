@@ -1,4 +1,5 @@
 use std::fmt::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::omnifs::provider::types::*;
 use crate::path::RecordType;
@@ -31,53 +32,18 @@ pub(crate) struct ResolverEntry {
     pub aliases: Vec<String>,
 }
 
-/// Serde binding for the TOML config.
-#[derive(serde::Deserialize)]
-#[serde(default)]
-struct RawConfig {
-    default_resolver: String,
-    #[serde(default)]
-    resolvers: hashbrown::HashMap<String, RawResolverEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct RawResolverEntry {
-    url: String,
-    #[serde(default)]
-    aliases: Vec<String>,
-}
-
-impl Default for RawConfig {
-    fn default() -> Self {
-        Self {
-            default_resolver: "cloudflare".to_string(),
-            resolvers: hashbrown::HashMap::new(),
-        }
-    }
-}
-
 impl ResolverConfig {
     pub fn from_toml(config_bytes: &[u8]) -> Self {
         let toml_str = std::str::from_utf8(config_bytes).unwrap_or("");
-        let raw: RawConfig = toml::from_str(toml_str).unwrap_or_default();
+        let mut parsed = parse_resolver_config(toml_str);
 
-        let mut resolvers: Vec<ResolverEntry> = raw
-            .resolvers
-            .into_iter()
-            .map(|(name, entry)| ResolverEntry {
-                name,
-                url: entry.url,
-                aliases: entry.aliases,
-            })
-            .collect();
-
-        if resolvers.is_empty() {
-            resolvers = Self::builtin_defaults();
+        if parsed.resolvers.is_empty() {
+            parsed.resolvers = Self::builtin_defaults();
         }
 
         Self {
-            default_name: raw.default_resolver,
-            resolvers,
+            default_name: parsed.default_name,
+            resolvers: parsed.resolvers,
         }
     }
 
@@ -154,7 +120,255 @@ impl ResolverConfig {
     }
 }
 
-pub(crate) fn query(config: &ResolverConfig, resolver: Option<&str>, domain: &str, rtype: RecordType) -> SingleEffect {
+struct ParsedResolverConfig {
+    default_name: String,
+    resolvers: Vec<ResolverEntry>,
+}
+
+#[derive(Default)]
+struct ResolverBuilder {
+    name: String,
+    url: Option<String>,
+    aliases: Vec<String>,
+}
+
+impl ResolverBuilder {
+    fn into_entry(self) -> Option<ResolverEntry> {
+        Some(ResolverEntry {
+            name: self.name,
+            url: self.url?,
+            aliases: self.aliases,
+        })
+    }
+}
+
+#[derive(Default)]
+enum ConfigSection {
+    #[default]
+    Root,
+    Resolvers,
+    ResolverTable,
+    Other,
+}
+
+fn parse_resolver_config(input: &str) -> ParsedResolverConfig {
+    let mut parsed = ParsedResolverConfig {
+        default_name: "cloudflare".to_string(),
+        resolvers: Vec::new(),
+    };
+    let mut section = ConfigSection::Root;
+    let mut current_resolver: Option<ResolverBuilder> = None;
+
+    for raw_line in input.lines() {
+        let line = strip_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(section_name) = parse_section(line) {
+            flush_resolver(&mut parsed.resolvers, &mut current_resolver);
+            if section_name == "resolvers" {
+                section = ConfigSection::Resolvers;
+            } else if let Some(name) = section_name.strip_prefix("resolvers.") {
+                current_resolver = Some(ResolverBuilder {
+                    name: parse_key(name),
+                    ..ResolverBuilder::default()
+                });
+                section = ConfigSection::ResolverTable;
+            } else {
+                section = ConfigSection::Other;
+            }
+            continue;
+        }
+
+        let Some((key, value)) = split_key_value(line) else {
+            continue;
+        };
+
+        match section {
+            ConfigSection::Root => {
+                if key == "default_resolver"
+                    && let Some(default_name) = parse_string(value)
+                {
+                    parsed.default_name = default_name;
+                }
+            }
+            ConfigSection::Resolvers => {
+                if let Some(entry) = parse_inline_resolver(key, value) {
+                    parsed.resolvers.push(entry);
+                }
+            }
+            ConfigSection::ResolverTable => {
+                if let Some(builder) = current_resolver.as_mut() {
+                    match key {
+                        "url" => builder.url = parse_string(value),
+                        "aliases" => builder.aliases = parse_string_array(value),
+                        _ => {}
+                    }
+                }
+            }
+            ConfigSection::Other => {}
+        }
+    }
+
+    flush_resolver(&mut parsed.resolvers, &mut current_resolver);
+    parsed
+}
+
+fn flush_resolver(entries: &mut Vec<ResolverEntry>, builder: &mut Option<ResolverBuilder>) {
+    if let Some(entry) = builder.take().and_then(ResolverBuilder::into_entry) {
+        entries.push(entry);
+    }
+}
+
+fn parse_section(line: &str) -> Option<&str> {
+    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
+}
+
+fn split_key_value(line: &str) -> Option<(&str, &str)> {
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in line.char_indices() {
+        match ch {
+            '\\' if in_string => escaped = !escaped,
+            '"' if !escaped => in_string = !in_string,
+            '=' if !in_string => {
+                return Some((line[..index].trim(), line[index + 1..].trim()));
+            }
+            _ => escaped = false,
+        }
+    }
+
+    None
+}
+
+fn strip_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in line.char_indices() {
+        match ch {
+            '\\' if in_string => escaped = !escaped,
+            '"' if !escaped => in_string = !in_string,
+            '#' if !in_string => return &line[..index],
+            _ => escaped = false,
+        }
+    }
+
+    line
+}
+
+fn parse_key(key: &str) -> String {
+    parse_string(key).unwrap_or_else(|| key.trim().to_string())
+}
+
+fn parse_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    let rest = value.strip_prefix('"')?;
+    let mut parsed = String::new();
+    let mut escaped = false;
+
+    for ch in rest.chars() {
+        if escaped {
+            match ch {
+                '"' => parsed.push('"'),
+                '\\' => parsed.push('\\'),
+                'n' => parsed.push('\n'),
+                'r' => parsed.push('\r'),
+                't' => parsed.push('\t'),
+                other => parsed.push(other),
+            }
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(parsed);
+        } else {
+            parsed.push(ch);
+        }
+    }
+
+    None
+}
+
+fn parse_string_array(value: &str) -> Vec<String> {
+    let Some(inner) = value
+        .trim()
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+    else {
+        return Vec::new();
+    };
+
+    split_comma_separated(inner)
+        .into_iter()
+        .filter_map(parse_string)
+        .collect()
+}
+
+fn parse_inline_resolver(key: &str, value: &str) -> Option<ResolverEntry> {
+    let inner = value
+        .trim()
+        .strip_prefix('{')
+        .and_then(|v| v.strip_suffix('}'))?;
+    let mut builder = ResolverBuilder {
+        name: parse_key(key),
+        ..ResolverBuilder::default()
+    };
+
+    for field in split_comma_separated(inner) {
+        let Some((field_name, field_value)) = split_key_value(field) else {
+            continue;
+        };
+        match field_name {
+            "url" => builder.url = parse_string(field_value),
+            "aliases" => builder.aliases = parse_string_array(field_value),
+            _ => {}
+        }
+    }
+
+    builder.into_entry()
+}
+
+fn split_comma_separated(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth = 0_u32;
+
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '\\' if in_string => escaped = !escaped,
+            '"' if !escaped => in_string = !in_string,
+            '[' | '{' if !in_string => {
+                depth = depth.saturating_add(1);
+                escaped = false;
+            }
+            ']' | '}' if !in_string => {
+                depth = depth.saturating_sub(1);
+                escaped = false;
+            }
+            ',' if !in_string && depth == 0 => {
+                parts.push(input[start..index].trim());
+                start = index + 1;
+                escaped = false;
+            }
+            _ => escaped = false,
+        }
+    }
+
+    parts.push(input[start..].trim());
+    parts
+}
+
+pub(crate) fn query(
+    config: &ResolverConfig,
+    resolver: Option<&str>,
+    domain: &str,
+    rtype: RecordType,
+) -> SingleEffect {
     let endpoint = config.resolve_endpoint(resolver);
     let sep = if endpoint.contains('?') { '&' } else { '?' };
     let url = format!("{endpoint}{sep}name={domain}&type={}", rtype.as_str());
@@ -189,7 +403,9 @@ struct DohAnswer {
     data: String,
 }
 
-fn default_ttl() -> u64 { 300 }
+fn default_ttl() -> u64 {
+    300
+}
 
 pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), String> {
     let resp: DohResponse =
@@ -212,84 +428,55 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)
     for a in &resp.answer {
         min_ttl = min_ttl.min(a.ttl);
         if let Some(rtype) = RecordType::from_wire(a.rtype) {
-            records.push(crate::DnsRecord { rtype, value: a.data.clone() });
+            records.push(crate::DnsRecord {
+                rtype,
+                value: a.data.clone(),
+            });
         }
     }
 
     Ok((records, if min_ttl == u64::MAX { 300 } else { min_ttl }))
 }
 
-pub(crate) fn reverse_query(config: &ResolverConfig, resolver: Option<&str>, ip: &str) -> SingleEffect {
-    let ptr_domain = if ip.contains(':') {
-        ip_to_ip6_arpa(ip)
-    } else {
-        ip_to_in_addr_arpa(ip)
+pub(crate) fn reverse_query(
+    config: &ResolverConfig,
+    resolver: Option<&str>,
+    ip: &str,
+) -> Result<SingleEffect, String> {
+    let addr = ip
+        .parse::<IpAddr>()
+        .map_err(|_| format!("invalid IP address: {ip}"))?;
+    let ptr_domain = match addr {
+        IpAddr::V4(addr) => ip_to_in_addr_arpa(addr),
+        IpAddr::V6(addr) => ip_to_ip6_arpa(addr),
     };
-    query(config, resolver, &ptr_domain, RecordType::PTR)
+    Ok(query(config, resolver, &ptr_domain, RecordType::PTR))
 }
 
-fn ip_to_in_addr_arpa(ip: &str) -> String {
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() == 4 {
-        format!(
-            "{}.{}.{}.{}.in-addr.arpa",
-            parts[3], parts[2], parts[1], parts[0]
-        )
-    } else {
-        format!("{ip}.in-addr.arpa")
-    }
+fn ip_to_in_addr_arpa(ip: Ipv4Addr) -> String {
+    let octets = ip.octets();
+    format!(
+        "{}.{}.{}.{}.in-addr.arpa",
+        octets[3], octets[2], octets[1], octets[0]
+    )
 }
 
-fn ip_to_ip6_arpa(ip: &str) -> String {
-    let expanded = expand_ipv6(ip);
+fn ip_to_ip6_arpa(ip: Ipv6Addr) -> String {
     // 32 nibbles + 31 dots + ".ip6.arpa" (9) = 72
     let mut out = String::with_capacity(72);
-    let mut first = true;
-    for c in expanded.chars().filter(|c| *c != ':').rev() {
-        if !first {
-            out.push('.');
-        }
-        out.push(c);
-        first = false;
-    }
-    out.push_str(".ip6.arpa");
-    out
-}
-
-fn expand_ipv6(ip: &str) -> String {
-    let mut out = String::with_capacity(39);
-    let groups: Vec<&str> = ip.split("::").collect();
-
-    let (left_parts, right_parts): (Vec<&str>, Vec<&str>) =
-        if let [left, right] = groups.as_slice() {
-            let l: Vec<&str> = if left.is_empty() {
-                vec![]
-            } else {
-                left.split(':').collect()
-            };
-            let r: Vec<&str> = if right.is_empty() {
-                vec![]
-            } else {
-                right.split(':').collect()
-            };
-            (l, r)
-        } else {
-            (ip.split(':').collect(), vec![])
-        };
-
-    let missing = 8 - left_parts.len() - right_parts.len();
-
-    for (i, p) in left_parts
+    for (i, nibble) in ip
+        .octets()
         .iter()
-        .chain(std::iter::repeat_n(&"0", missing))
-        .chain(right_parts.iter())
+        .rev()
+        .flat_map(|byte| [byte & 0x0f, byte >> 4])
         .enumerate()
     {
         if i > 0 {
-            out.push(':');
+            out.push('.');
         }
-        let _ = write!(out, "{p:0>4}");
+        let _ = write!(out, "{nibble:x}");
     }
+    out.push_str(".ip6.arpa");
     out
 }
 
@@ -354,29 +541,30 @@ mod tests {
     #[test]
     fn in_addr_arpa() {
         assert_eq!(
-            ip_to_in_addr_arpa("93.184.216.34"),
+            ip_to_in_addr_arpa(Ipv4Addr::new(93, 184, 216, 34)),
             "34.216.184.93.in-addr.arpa"
-        );
-    }
-
-    #[test]
-    fn ipv6_expansion() {
-        assert_eq!(
-            expand_ipv6("::1"),
-            "0000:0000:0000:0000:0000:0000:0000:0001"
-        );
-        assert_eq!(
-            expand_ipv6("2606:2800:220:1:248:1893:25c8:1946"),
-            "2606:2800:0220:0001:0248:1893:25c8:1946"
         );
     }
 
     #[test]
     fn ip6_arpa() {
         assert_eq!(
-            ip_to_ip6_arpa("::1"),
+            ip_to_ip6_arpa(Ipv6Addr::LOCALHOST),
             "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
         );
+    }
+
+    #[test]
+    fn invalid_reverse_ip_is_rejected() {
+        let cfg = default_config();
+        assert!(matches!(
+            reverse_query(&cfg, None, "1:2:3:4:5:6:7:8:9"),
+            Err(err) if err.contains("invalid IP address")
+        ));
+        assert!(matches!(
+            reverse_query(&cfg, None, "999.184.216.34"),
+            Err(err) if err.contains("invalid IP address")
+        ));
     }
 
     #[test]

@@ -31,9 +31,18 @@ pub(crate) struct QueryContext {
 
 #[allow(dead_code)]
 enum Continuation {
-    Single { ctx: QueryContext, rtype: RecordType },
-    All { ctx: QueryContext, results: Vec<DnsRecord>, pending_types: Vec<RecordType> },
-    Raw { ctx: QueryContext },
+    Single {
+        ctx: QueryContext,
+        rtype: RecordType,
+    },
+    All {
+        ctx: QueryContext,
+        results: Vec<DnsRecord>,
+        pending_types: Vec<RecordType>,
+    },
+    Raw {
+        ctx: QueryContext,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -83,8 +92,7 @@ impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
                     field_type: "string".to_string(),
                     required: false,
                     default_value: Some("cloudflare".to_string()),
-                    description: "Default resolver alias used when no @resolver prefix"
-                        .to_string(),
+                    description: "Default resolver alias used when no @resolver prefix".to_string(),
                 },
                 ConfigField {
                     name: "resolvers".to_string(),
@@ -99,10 +107,7 @@ impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
 
     fn capabilities() -> RequestedCapabilities {
         RequestedCapabilities {
-            domains: vec![
-                "cloudflare-dns.com".to_string(),
-                "dns.google".to_string(),
-            ],
+            domains: vec!["cloudflare-dns.com".to_string(), "dns.google".to_string()],
             auth_types: vec![],
             max_memory_mb: 32,
             needs_git: false,
@@ -143,7 +148,9 @@ impl exports::omnifs::provider::resume::Guest for DnsProvider {
     }
 
     fn cancel(id: u64) {
-        let _ = with_state(|s| { s.pending.remove(&id); });
+        let _ = with_state(|s| {
+            s.pending.remove(&id);
+        });
     }
 }
 

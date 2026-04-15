@@ -27,11 +27,21 @@ pub(crate) fn dispatch_batch(
 }
 
 pub(crate) fn mk_dir(name: impl Into<String>) -> DirEntry {
-    DirEntry { name: name.into(), kind: EntryKind::Directory, size: None, projected_files: None }
+    DirEntry {
+        name: name.into(),
+        kind: EntryKind::Directory,
+        size: None,
+        projected_files: None,
+    }
 }
 
 pub(crate) fn mk_file(name: impl Into<String>) -> DirEntry {
-    DirEntry { name: name.into(), kind: EntryKind::File, size: Some(4096), projected_files: None }
+    DirEntry {
+        name: name.into(),
+        kind: EntryKind::File,
+        size: Some(4096),
+        projected_files: None,
+    }
 }
 
 pub(crate) fn dir_entry(name: &str) -> ProviderResponse {

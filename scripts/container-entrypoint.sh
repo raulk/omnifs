@@ -5,7 +5,7 @@ if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
 
-: "${OMNIFS_MOUNT_POINT:=/github}"
+: "${OMNIFS_MOUNT_POINT:=/omnifs}"
 : "${OMNIFS_CONFIG_DIR:=/root/.omnifs}"
 : "${OMNIFS_CACHE_DIR:=/tmp/omnifs-cache}"
 : "${OMNIFS_LOG_FILE:=/tmp/omnifs.log}"
@@ -17,6 +17,11 @@ mkdir -p \
   "$OMNIFS_CONFIG_DIR" \
   "$OMNIFS_CACHE_DIR" \
   "$(dirname "$OMNIFS_LOG_FILE")"
+
+if [ "$OMNIFS_MOUNT_POINT" = "/omnifs" ]; then
+  ln -sfn /omnifs/github /github
+  ln -sfn /omnifs/dns /dns
+fi
 
 log_pipe=/tmp/omnifs-entrypoint.log.pipe
 rm -f "$log_pipe"
