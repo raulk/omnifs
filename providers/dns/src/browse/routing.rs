@@ -1,4 +1,4 @@
-use super::{dir_entry, dispatch, dispatch_batch, err, file_entry, KNOWN_RESOLVERS};
+use super::{cached_content, dir_entry, dispatch, dispatch_batch, err, file_entry, KNOWN_RESOLVERS};
 use crate::doh;
 use crate::omnifs::provider::types::*;
 use crate::path::{FsPath, RecordType};
@@ -19,9 +19,9 @@ pub fn lookup_child(_id: u64, parent_path: &str, name: &str) -> ProviderResponse
         FsPath::Root => dir_entry(name),
         FsPath::Resolvers => file_entry("_resolvers"),
         FsPath::ReverseRoot => dir_entry("_reverse"),
-        FsPath::ReverseIp { .. } => dir_entry(name),
-        FsPath::Resolver { .. } => dir_entry(name),
-        FsPath::Domain { .. } => dir_entry(name),
+        FsPath::ReverseIp { .. } | FsPath::Resolver { .. } | FsPath::Domain { .. } => {
+            dir_entry(name)
+        }
         FsPath::Record { .. } => file_entry(name),
         FsPath::All { .. } => file_entry("_all"),
         FsPath::Raw { .. } => file_entry("_raw"),
@@ -35,14 +35,8 @@ pub fn list_children(_id: u64, path: &str) -> ProviderResponse {
 
     match fs_path {
         FsPath::Root => list_root(),
-        FsPath::Resolver { .. } => {
-            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
-                entries: vec![],
-                exhaustive: false,
-            }))
-        }
         FsPath::Domain { .. } => list_domain(),
-        FsPath::ReverseRoot => {
+        FsPath::Resolver { .. } | FsPath::ReverseRoot => {
             ProviderResponse::Done(ActionResult::DirEntries(DirListing {
                 entries: vec![],
                 exhaustive: false,
@@ -151,6 +145,10 @@ fn read_record(
     domain: &str,
     rtype: RecordType,
 ) -> ProviderResponse {
+    if let Some(resp) = cached_content(resolver, domain, rtype) {
+        return resp;
+    }
+
     dispatch(
         id,
         Continuation::Single {

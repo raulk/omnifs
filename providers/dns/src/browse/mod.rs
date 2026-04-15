@@ -45,6 +45,23 @@ pub(crate) fn file_entry(name: &str) -> ProviderResponse {
     })))
 }
 
+/// Check the in-memory cache for a previously resolved record.
+pub(crate) fn cached_content(
+    resolver: Option<&str>,
+    domain: &str,
+    rtype: RecordType,
+) -> Option<ProviderResponse> {
+    let key = cache_key(resolver, domain, rtype);
+    with_state(|state| {
+        state.cache.get(&key).map(|entry| {
+            let content = format_records(&entry.records);
+            ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
+        })
+    })
+    .ok()
+    .flatten()
+}
+
 #[allow(clippy::needless_pass_by_value)]
 pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
     let continuation = match with_state(|s| s.pending.remove(&id)) {
@@ -107,11 +124,9 @@ fn resume_all(
     pending_types: &[RecordType],
     outcome: &EffectResult,
 ) -> ProviderResponse {
-    let results = match outcome {
+    let results: &[SingleEffectResult] = match outcome {
         EffectResult::Batch(results) => results,
-        EffectResult::Single(r) => {
-            return resume_all_single(resolver, domain, accumulated, pending_types, r);
-        }
+        EffectResult::Single(r) => std::slice::from_ref(r),
     };
 
     for (i, result) in results.iter().enumerate() {
@@ -127,27 +142,6 @@ fn resume_all(
         }
     }
 
-    let content = format_all_records(&accumulated);
-    ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
-}
-
-fn resume_all_single(
-    _resolver: Option<&str>,
-    _domain: &str,
-    mut accumulated: Vec<DnsRecord>,
-    _pending_types: &[RecordType],
-    result: &SingleEffectResult,
-) -> ProviderResponse {
-    let body = match result {
-        SingleEffectResult::HttpResponse(resp) if resp.status < 400 => &resp.body,
-        _ => {
-            let content = format_all_records(&accumulated);
-            return ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()));
-        }
-    };
-    if let Ok((records, _ttl)) = doh::parse_response(body) {
-        accumulated.extend(records);
-    }
     let content = format_all_records(&accumulated);
     ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
 }

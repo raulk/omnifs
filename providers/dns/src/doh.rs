@@ -1,10 +1,11 @@
+use std::fmt::Write;
+
 use crate::omnifs::provider::types::*;
 use crate::path::RecordType;
 
 const CLOUDFLARE_DOH: &str = "https://cloudflare-dns.com/dns-query";
 const GOOGLE_DOH: &str = "https://dns.google/resolve";
 
-/// Resolve a resolver specifier to its `DoH` endpoint URL.
 pub(crate) fn resolve_endpoint(resolver: Option<&str>) -> &str {
     match resolver {
         None | Some("cloudflare" | "1.1.1.1" | "1.0.0.1") => CLOUDFLARE_DOH,
@@ -14,7 +15,6 @@ pub(crate) fn resolve_endpoint(resolver: Option<&str>) -> &str {
     }
 }
 
-/// Build an HTTP fetch effect for a `DoH` JSON query.
 pub(crate) fn query(resolver: Option<&str>, domain: &str, rtype: RecordType) -> SingleEffect {
     let endpoint = resolve_endpoint(resolver);
     let sep = if endpoint.contains('?') { '&' } else { '?' };
@@ -31,7 +31,6 @@ pub(crate) fn query(resolver: Option<&str>, domain: &str, rtype: RecordType) -> 
     })
 }
 
-/// Build a batch of `DoH` queries for multiple record types.
 pub(crate) fn query_batch(
     resolver: Option<&str>,
     domain: &str,
@@ -43,7 +42,6 @@ pub(crate) fn query_batch(
         .collect()
 }
 
-/// Parse a `DoH` JSON response into DNS records.
 pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), String> {
     let json: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("invalid DoH JSON: {e}"))?;
@@ -63,16 +61,16 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)
         return Err(format!("DNS {status_name} (status {status})"));
     }
 
+    let empty = Vec::new();
     let answers = json
         .get("Answer")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&empty);
 
     let mut min_ttl = u64::MAX;
     let mut records = Vec::new();
 
-    for answer in &answers {
+    for answer in answers {
         #[allow(clippy::cast_possible_truncation)]
         let type_num = answer
             .get("type")
@@ -101,8 +99,6 @@ pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64)
     Ok((records, min_ttl))
 }
 
-/// Build a PTR query for reverse DNS. Converts an IP address to its
-/// in-addr.arpa or ip6.arpa form.
 pub(crate) fn reverse_query(resolver: Option<&str>, ip: &str) -> SingleEffect {
     let ptr_domain = if ip.contains(':') {
         ip_to_ip6_arpa(ip)
@@ -126,47 +122,56 @@ fn ip_to_in_addr_arpa(ip: &str) -> String {
 
 fn ip_to_ip6_arpa(ip: &str) -> String {
     let expanded = expand_ipv6(ip);
-    expanded
-        .chars()
-        .filter(|c| *c != ':')
-        .rev()
-        .map(|c| c.to_string())
-        .collect::<Vec<String>>()
-        .join(".")
-        + ".ip6.arpa"
+    // 32 nibbles + 31 dots + ".ip6.arpa" (9) = 72
+    let mut out = String::with_capacity(72);
+    let mut first = true;
+    for c in expanded.chars().filter(|c| *c != ':').rev() {
+        if !first {
+            out.push('.');
+        }
+        out.push(c);
+        first = false;
+    }
+    out.push_str(".ip6.arpa");
+    out
 }
 
 fn expand_ipv6(ip: &str) -> String {
+    // Pre-allocate: 8 groups * 4 chars + 7 colons = 39
+    let mut out = String::with_capacity(39);
     let groups: Vec<&str> = ip.split("::").collect();
-    if let [left, right] = groups.as_slice() {
-        let left_parts: Vec<&str> = if left.is_empty() {
-            vec![]
+
+    let (left_parts, right_parts): (Vec<&str>, Vec<&str>) =
+        if let [left, right] = groups.as_slice() {
+            let l: Vec<&str> = if left.is_empty() {
+                vec![]
+            } else {
+                left.split(':').collect()
+            };
+            let r: Vec<&str> = if right.is_empty() {
+                vec![]
+            } else {
+                right.split(':').collect()
+            };
+            (l, r)
         } else {
-            left.split(':').collect()
+            (ip.split(':').collect(), vec![])
         };
-        let right_parts: Vec<&str> = if right.is_empty() {
-            vec![]
-        } else {
-            right.split(':').collect()
-        };
-        let missing = 8 - left_parts.len() - right_parts.len();
-        let mut all = Vec::with_capacity(8);
-        for p in &left_parts {
-            all.push(format!("{p:0>4}"));
+
+    let missing = 8 - left_parts.len() - right_parts.len();
+
+    for (i, p) in left_parts
+        .iter()
+        .chain(std::iter::repeat_n(&"0", missing))
+        .chain(right_parts.iter())
+        .enumerate()
+    {
+        if i > 0 {
+            out.push(':');
         }
-        for _ in 0..missing {
-            all.push("0000".to_string());
-        }
-        for p in &right_parts {
-            all.push(format!("{p:0>4}"));
-        }
-        all.join(":")
-    } else {
-        ip.split(':')
-            .map(|p| format!("{p:0>4}"))
-            .collect::<Vec<String>>()
-            .join(":")
+        let _ = write!(out, "{p:0>4}");
     }
+    out
 }
 
 fn type_num_to_record(num: u16) -> Option<RecordType> {
@@ -220,6 +225,14 @@ mod tests {
         assert_eq!(
             expand_ipv6("2606:2800:220:1:248:1893:25c8:1946"),
             "2606:2800:0220:0001:0248:1893:25c8:1946"
+        );
+    }
+
+    #[test]
+    fn ip6_arpa() {
+        assert_eq!(
+            ip_to_ip6_arpa("::1"),
+            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa"
         );
     }
 

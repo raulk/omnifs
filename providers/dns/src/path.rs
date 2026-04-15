@@ -1,7 +1,3 @@
-/// Record types supported by the provider.
-///
-/// Each variant maps to a DNS RR type and corresponds to a filename
-/// inside a domain directory (e.g. `/dns/example.com/A`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum RecordType {
@@ -49,7 +45,8 @@ impl RecordType {
         }
     }
 
-    /// All record types shown in a domain directory listing.
+    /// PTR excluded: only reachable via `_reverse/<ip>`, not as a
+    /// direct child of a domain directory.
     pub fn all() -> &'static [Self] {
         &[
             Self::A,
@@ -64,7 +61,7 @@ impl RecordType {
         ]
     }
 
-    /// Common types queried for `_all` (skip SRV/CAA to reduce noise).
+    /// Subset queried in parallel for `_all` (skip SRV/CAA to reduce noise).
     pub fn common() -> &'static [Self] {
         &[
             Self::A,
@@ -78,18 +75,7 @@ impl RecordType {
     }
 }
 
-/// Parsed filesystem path within the DNS provider.
-///
-/// Hierarchy:
-///   ""                                  -> provider root
-///   "@<resolver>"                       -> resolver directory
-///   "@<resolver>/<domain>"              -> domain under resolver
-///   "@<resolver>/<domain>/<record>"     -> record file under resolver
-///   "<domain>"                          -> domain directory (default resolver)
-///   "<domain>/<record>"                 -> record file
-///   "_reverse"                          -> reverse lookup namespace
-///   "_reverse/<ip>"                     -> PTR result
-///   "_resolvers"                        -> list of known resolvers
+/// Parsed path within the DNS provider. Max depth is 3 segments.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum FsPath<'a> {
@@ -127,29 +113,39 @@ impl<'a> FsPath<'a> {
             return Some(Self::Root);
         }
 
-        let segments: Vec<&str> = path.split('/').collect();
+        // Max depth is 3 (@resolver/domain/record), so splitn(4) detects
+        // overflow without allocating a Vec.
+        let mut parts = path.splitn(4, '/');
+        let seg1 = parts.next()?;
+        let seg2 = parts.next();
+        let seg3 = parts.next();
 
-        match segments.as_slice() {
-            ["_resolvers"] => Some(Self::Resolvers),
-            ["_reverse"] => Some(Self::ReverseRoot),
-            ["_reverse", ip] => Some(Self::ReverseIp { ip }),
+        // Reject paths deeper than 3 segments.
+        if parts.next().is_some() {
+            return None;
+        }
 
-            [resolver] if resolver.starts_with('@') => Some(Self::Resolver {
+        match (seg1, seg2, seg3) {
+            ("_resolvers", None, None) => Some(Self::Resolvers),
+            ("_reverse", None, None) => Some(Self::ReverseRoot),
+            ("_reverse", Some(ip), None) => Some(Self::ReverseIp { ip }),
+
+            (resolver, None, None) if resolver.starts_with('@') => Some(Self::Resolver {
                 resolver: &resolver[1..],
             }),
-            [resolver, domain] if resolver.starts_with('@') => Some(Self::Domain {
+            (resolver, Some(domain), None) if resolver.starts_with('@') => Some(Self::Domain {
                 resolver: Some(&resolver[1..]),
                 domain,
             }),
-            [resolver, domain, record] if resolver.starts_with('@') => {
+            (resolver, Some(domain), Some(record)) if resolver.starts_with('@') => {
                 parse_record_or_anchor(Some(&resolver[1..]), domain, record)
             }
 
-            [domain] if is_domain_like(domain) => Some(Self::Domain {
+            (domain, None, None) if is_domain_like(domain) => Some(Self::Domain {
                 resolver: None,
                 domain,
             }),
-            [domain, record] if is_domain_like(domain) => {
+            (domain, Some(record), None) if is_domain_like(domain) => {
                 parse_record_or_anchor(None, domain, record)
             }
 
@@ -266,5 +262,10 @@ mod tests {
     #[test]
     fn reject_non_domain() {
         assert!(FsPath::parse("not-a-domain").is_none());
+    }
+
+    #[test]
+    fn reject_deep_path() {
+        assert!(FsPath::parse("@r/example.com/A/extra").is_none());
     }
 }
