@@ -69,34 +69,52 @@ docker compose exec omnifs /bin/zsh
 ### Explore
 
 ```bash
-##
-## GITHUB
-##
+#####################
+## GitHub as files
+###################
+
 # List repos in user/org
-cd /github/torvalds
-ls
+> cd /github/torvalds
+> ls
+1590A       GuitarPedal       libdc-for-dirk  linux       subsurface-for-dirk  uemacs
+AudioNoise  HunspellColorize  libgit2         pesconvert  test-tlb
 
 # cd into a repo
-cd /github/ollama/ollama
-ls
+> cd /github/ollama/ollama
+> ls
+_actions  _issues  _prs  _repo
 
-# clone the repo
-cd /github/ollama/ollama/_repo
-ls
+# clone the repo just by listing it
+> cd /github/ollama/ollama/_repo
+> ls
+CMakeLists.txt     Makefile.sync  cmd        go.mod       llm         openai    server     x
+CMakePresets.json  README.md      convert    go.sum       logutil     parser    template
+CONTRIBUTING.md    SECURITY.md    discover   harmony      main.go     progress  thinking
+[...]
 
 # list open issues
-cd /github/ollama/ollama/_issues/_open
-ls
+> cd /github/ollama/ollama/_issues/_open
+> ls
+10333  10928  11381  11743  12138  12539  12959  13399  13879  14239  14621  15087  15398
+10337  10929  11384  11746  12148  12541  12963  13401  13883  14243  14628  15091  15400
 
-##
-## DNS
-##
+## ... and a lot more! play the video above for a walkthrough
 
-# query DNS records
-cd /dns/cloudflare.com
-cat A
+###################
+## DNS as files
+###################
 
-# poke around!
+> cd /dns/cloudflare.com
+> ls
+A  AAAA  CAA  CNAME  MX  NS  SOA  SRV  TXT  _all  _raw
+> cat A
+104.16.133.229
+> cat /dns/@8.8.8.8/google.com/AAAA
+2a00:1450:4003:804::200e
+> cat /dns/_reverse/1.1.1.1
+one.one.one.one.
+
+## poke around!
 ```
 
 Use `docker compose logs omnifs` to inspect logs and `docker compose down` to stop the source-built container.
