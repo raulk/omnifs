@@ -233,8 +233,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: omnifs-runtime-artifacts
+          path: dist
+
       - name: Set up Docker Compose
-        uses: docker/setup-compose-action@v2
+        uses: docker/setup-compose-action@v2.1.0
 
       - name: Start SSH agent socket
         run: |
@@ -251,7 +257,7 @@ jobs:
       - name: Start compose stack
         run: |
           set -euo pipefail
-          docker compose up --build -d
+          docker compose -f compose.yaml -f compose.ci.yaml up --build -d
 
           for _ in $(seq 1 60); do
             if docker compose exec -T omnifs sh -lc "grep -qs ' /github ' /proc/mounts"; then
