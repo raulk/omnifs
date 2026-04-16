@@ -8,7 +8,7 @@ RUN apt-get update \
         fuse3 libfuse3-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked \
-    && cargo install cargo-component --locked \
+    && cargo install wasm-tools --locked \
     && rustup target add wasm32-wasip1
 
 # --- Dependency cache (host crates) ---
@@ -30,10 +30,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM toolchain AS providers
 WORKDIR /src
 COPY . .
+COPY build/wasi_snapshot_preview1.reactor.wasm /tmp/wasi_adapter.wasm
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    cargo component build \
-        --manifest-path providers/github/Cargo.toml \
-        --release --target-dir /src/target
+    cargo build \
+        -p omnifs-provider-github -p omnifs-provider-dns \
+        --target wasm32-wasip1 --release --target-dir /src/target \
+    && for wasm in /src/target/wasm32-wasip1/release/omnifs_provider_*.wasm; do \
+        wasm-tools component new "$wasm" \
+            --adapt "wasi_snapshot_preview1=/tmp/wasi_adapter.wasm" \
+            -o "$wasm"; \
+    done
 
 # --- Build host binary ---
 
@@ -82,7 +88,6 @@ RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
 RUN cat > /root/.omnifs/providers/github.toml <<'CONF'
 plugin = "omnifs_provider_github.wasm"
 mount = "github"
-root_mount = true
 
 [auth]
 type = "bearer-token"
@@ -95,6 +100,15 @@ git_repos = ["git@github.com:*"]
 max_memory_mb = 256
 CONF
 
+RUN cat > /root/.omnifs/providers/dns.toml <<'CONF'
+plugin = "omnifs_provider_dns.wasm"
+mount = "dns"
+
+[capabilities]
+domains = ["cloudflare-dns.com", "dns.google"]
+max_memory_mb = 32
+CONF
+
 SHELL ["/bin/zsh", "-c"]
 ENV SHELL=/bin/zsh
 WORKDIR /
@@ -104,11 +118,14 @@ FROM runtime-base AS runtime-prebuilt
 
 COPY dist/omnifs /usr/local/bin/omnifs
 COPY dist/omnifs_provider_github.wasm /root/.omnifs/plugins/
+COPY dist/omnifs_provider_dns.wasm /root/.omnifs/plugins/
 RUN chmod 0755 /usr/local/bin/omnifs
 
 FROM runtime-base AS runtime
 
 COPY --from=builder /omnifs /usr/local/bin/
 COPY --from=providers /src/target/wasm32-wasip1/release/omnifs_provider_github.wasm \
+     /root/.omnifs/plugins/
+COPY --from=providers /src/target/wasm32-wasip1/release/omnifs_provider_dns.wasm \
      /root/.omnifs/plugins/
 RUN chmod 0755 /usr/local/bin/omnifs

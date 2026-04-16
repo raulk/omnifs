@@ -62,7 +62,7 @@ jobs:
         run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
 
       - name: Run provider clippy
-        run: cargo clippy -p omnifs-provider-github -p test-provider --target wasm32-wasip1 -- -D warnings
+        run: cargo clippy -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip1 -- -D warnings
 
   rust-build-test:
     if: needs.pr-gate.outputs.approved == 'true'
@@ -115,6 +115,7 @@ jobs:
           mkdir -p dist
           cp target/release/omnifs dist/omnifs
           cp target/wasm32-wasip1/release/omnifs_provider_github.wasm dist/omnifs_provider_github.wasm
+          cp target/wasm32-wasip1/release/omnifs_provider_dns.wasm dist/omnifs_provider_dns.wasm
 
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@v4.6.2

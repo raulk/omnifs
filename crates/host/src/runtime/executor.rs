@@ -6,6 +6,7 @@
 use crate::auth::AuthManager;
 use crate::runtime::capability::CapabilityChecker;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,38 +106,33 @@ impl HttpExecutor {
             };
         }
 
-        let reqwest_method = match method {
-            "GET" => reqwest::Method::GET,
-            "POST" => reqwest::Method::POST,
-            "PUT" => reqwest::Method::PUT,
-            "PATCH" => reqwest::Method::PATCH,
-            "DELETE" => reqwest::Method::DELETE,
-            "HEAD" => reqwest::Method::HEAD,
-            "OPTIONS" => reqwest::Method::OPTIONS,
-            other => {
-                return EffectResponse::Error {
-                    kind: ErrorKind::Denied,
-                    message: format!("unsupported HTTP method: {other}"),
-                    retryable: false,
-                };
-            }
+        let Ok(reqwest_method) = reqwest::Method::from_str(method) else {
+            return EffectResponse::Error {
+                kind: ErrorKind::Denied,
+                message: format!("unsupported HTTP method: {method}"),
+                retryable: false,
+            };
         };
 
         let mut req = self.client.request(reqwest_method, url);
 
+        // TODO: use HeaderMap::try_from(HashMap).
         for (name, value) in &auth_headers {
             req = req.header(name.as_str(), value.as_str());
         }
+        // TODO: use HeaderMap::try_from(HashMap).
         for (name, value) in headers {
             req = req.header(name.as_str(), value.as_str());
         }
         if let Some(body) = body {
+            // TODO: is to_vec necessary?
             req = req.body(body.to_vec());
         }
 
         match req.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
+                // TODO: feels sloppy.
                 let resp_headers: Vec<(String, String)> = response
                     .headers()
                     .iter()
