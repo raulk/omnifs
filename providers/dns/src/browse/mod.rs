@@ -72,9 +72,9 @@ pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
     };
 
     match continuation {
-        Continuation::Single { .. } => resume_single(&effect_outcome),
-        Continuation::All { results, .. } => resume_all(results, &effect_outcome),
-        Continuation::Raw { ctx, .. } => resume_raw(&ctx.domain, &effect_outcome),
+        Continuation::Single => resume_single(&effect_outcome),
+        Continuation::All { results } => resume_all(results, &effect_outcome),
+        Continuation::Raw { domain } => resume_raw(&domain, &effect_outcome),
     }
 }
 
@@ -118,7 +118,7 @@ fn resume_raw(domain: &str, outcome: &EffectResult) -> ProviderResponse {
             let _ = writeln!(out, ";; QUESTION SECTION:\n;{domain}.\t\tIN\tA");
             out.push_str("\n;; ANSWER SECTION:\n");
             for r in &records {
-                let _ = writeln!(out, "{domain}.\t\tIN\t{}\t{}", r.rtype.as_str(), r.value);
+                let _ = writeln!(out, "{domain}.\t\tIN\t{}\t{}", r.rtype.as_ref(), r.value);
             }
             let _ = write!(out, "\n;; RECORDS: {}\n", records.len());
             file_content(out)
@@ -151,24 +151,22 @@ fn format_records(records: &[DnsRecord]) -> String {
     if records.is_empty() {
         return "\n".to_string();
     }
-    let mut out = String::new();
-    for r in records {
-        out.push_str(&r.value);
-        out.push('\n');
-    }
-    out
+    records
+        .iter()
+        .map(|r| &*r.value)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 fn format_all_records(records: &[DnsRecord]) -> String {
     if records.is_empty() {
         return ";; no records\n".to_string();
     }
-    let mut out = String::new();
-    for r in records {
-        out.push_str(r.rtype.as_str());
-        out.push('\t');
-        out.push_str(&r.value);
-        out.push('\n');
-    }
-    out
+    records
+        .iter()
+        .map(|r| format!("{}\t{}", r.rtype.as_ref(), r.value))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }

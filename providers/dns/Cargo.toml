@@ -2,7 +2,7 @@
 name = "omnifs-provider-dns"
 version = "0.1.0"
 edition = "2024"
-description = "OmnIFS provider for DNS record browsing via DNS-over-HTTPS"
+description = "omnifs provider for DNS record browsing via DNS-over-HTTPS"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/raulk/omnifs"
 homepage = "https://github.com/raulk/omnifs"
@@ -12,9 +12,11 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 wit-bindgen = "0.41"
-hashbrown = "0.15"
+hashbrown = { version = "0.15", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+strum = { version = "0.27", features = ["derive"] }
+toml = "0.8"
 
 [package.metadata.component]
 package = "omnifs:provider"

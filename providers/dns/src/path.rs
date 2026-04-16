@@ -1,6 +1,17 @@
 use std::net::IpAddr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::Display,
+    strum::EnumString,
+    strum::AsRefStr,
+    strum::VariantArray,
+)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum RecordType {
     A,
@@ -16,37 +27,6 @@ pub(crate) enum RecordType {
 }
 
 impl RecordType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::AAAA => "AAAA",
-            Self::CNAME => "CNAME",
-            Self::MX => "MX",
-            Self::NS => "NS",
-            Self::TXT => "TXT",
-            Self::SOA => "SOA",
-            Self::SRV => "SRV",
-            Self::CAA => "CAA",
-            Self::PTR => "PTR",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "A" => Some(Self::A),
-            "AAAA" => Some(Self::AAAA),
-            "CNAME" => Some(Self::CNAME),
-            "MX" => Some(Self::MX),
-            "NS" => Some(Self::NS),
-            "TXT" => Some(Self::TXT),
-            "SOA" => Some(Self::SOA),
-            "SRV" => Some(Self::SRV),
-            "CAA" => Some(Self::CAA),
-            "PTR" => Some(Self::PTR),
-            _ => None,
-        }
-    }
-
     /// PTR excluded: it is only used internally for `_reverse/<ip>`.
     pub fn all() -> &'static [Self] {
         &[
@@ -140,49 +120,64 @@ impl<'a> FsPath<'a> {
         let seg1 = parts.next()?;
         let seg2 = parts.next();
         let seg3 = parts.next();
-
-        // Reject paths deeper than 3 segments.
         if parts.next().is_some() {
             return None;
         }
 
-        match (seg1, seg2, seg3) {
-            ("_resolvers", None, None) => Some(Self::Resolvers),
-            ("_reverse", None, None) => Some(Self::ReverseRoot),
-            ("_reverse", Some(ip), None) => Some(Self::ReverseIp { ip }),
-
-            (resolver, None, None) if resolver.starts_with('@') => Some(Self::Resolver {
-                resolver: &resolver[1..],
-            }),
-            (resolver, Some(ip), None) if resolver.starts_with('@') && is_ip_addr(ip) => {
-                Some(Self::DirectReverseIp {
-                    resolver: Some(&resolver[1..]),
-                    ip,
-                })
+        match seg1 {
+            "_resolvers" if seg2.is_none() => Some(Self::Resolvers),
+            "_reverse" => parse_reverse(seg2, seg3),
+            _ => {
+                // Normalize: strip optional @resolver prefix, shift segments.
+                let (resolver, target, child) = match seg1.strip_prefix('@') {
+                    Some(r) => (Some(r), seg2, seg3),
+                    None => (None, Some(seg1), seg2),
+                };
+                parse_target(resolver, target, child)
             }
-            (resolver, Some(ip), Some(_)) if resolver.starts_with('@') && is_ip_addr(ip) => None,
-            (resolver, Some(domain), None) if resolver.starts_with('@') => Some(Self::Domain {
-                resolver: Some(&resolver[1..]),
-                domain,
-            }),
-            (resolver, Some(domain), Some(record)) if resolver.starts_with('@') => {
-                parse_record_or_anchor(Some(&resolver[1..]), domain, record)
-            }
-
-            (ip, None, None) if is_ip_addr(ip) => {
-                Some(Self::DirectReverseIp { resolver: None, ip })
-            }
-            (ip, Some(_), None) if is_ip_addr(ip) => None,
-            (domain, None, None) if is_domain_like(domain) => Some(Self::Domain {
-                resolver: None,
-                domain,
-            }),
-            (domain, Some(record), None) if is_domain_like(domain) => {
-                parse_record_or_anchor(None, domain, record)
-            }
-
-            _ => None,
         }
+    }
+}
+
+fn parse_reverse<'a>(target: Option<&'a str>, child: Option<&'a str>) -> Option<FsPath<'a>> {
+    match (target, child) {
+        (None, _) => Some(FsPath::ReverseRoot),
+        (Some(ip), None) => Some(FsPath::ReverseIp { ip }),
+        _ => None,
+    }
+}
+
+fn parse_target<'a>(
+    resolver: Option<&'a str>,
+    target: Option<&'a str>,
+    child: Option<&'a str>,
+) -> Option<FsPath<'a>> {
+    let Some(target) = target else {
+        return Some(FsPath::Resolver {
+            resolver: resolver?,
+        });
+    };
+
+    if is_ip_addr(target) {
+        return match child {
+            None => Some(FsPath::DirectReverseIp {
+                resolver,
+                ip: target,
+            }),
+            _ => None,
+        };
+    }
+
+    if resolver.is_none() && !is_domain_like(target) {
+        return None;
+    }
+
+    match child {
+        None => Some(FsPath::Domain {
+            resolver,
+            domain: target,
+        }),
+        Some(record) => parse_record_or_anchor(resolver, target, record),
     }
 }
 
@@ -195,7 +190,7 @@ fn parse_record_or_anchor<'a>(
         "_all" => Some(FsPath::All { resolver, domain }),
         "_raw" => Some(FsPath::Raw { resolver, domain }),
         "PTR" => None,
-        _ => RecordType::from_str(name).map(|rtype| FsPath::Record {
+        _ => name.parse::<RecordType>().ok().map(|rtype| FsPath::Record {
             resolver,
             domain,
             rtype,
@@ -364,11 +359,12 @@ mod tests {
 
     #[test]
     fn all_covers_all_non_ptr_variants() {
-        // Guard against adding a variant to RecordType without updating all().
-        for rt in RecordType::all() {
-            assert_eq!(RecordType::from_str(rt.as_str()), Some(*rt));
-        }
-        // PTR is intentionally excluded from all() but remains available internally.
-        assert_eq!(RecordType::from_str("PTR"), Some(RecordType::PTR));
+        use strum::VariantArray;
+        let expected: Vec<_> = RecordType::VARIANTS
+            .iter()
+            .filter(|v| **v != RecordType::PTR)
+            .collect();
+        let actual: Vec<_> = RecordType::all().iter().collect();
+        assert_eq!(actual, expected, "all() must match VARIANTS minus PTR");
     }
 }

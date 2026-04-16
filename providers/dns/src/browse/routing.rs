@@ -3,13 +3,13 @@ use super::{resolver_dir_names, resolvers_content};
 use crate::doh;
 use crate::omnifs::provider::types::*;
 use crate::path::{FsPath, RecordType};
-use crate::{Continuation, QueryContext, with_state};
+use crate::{Continuation, with_state};
 
 pub fn lookup_child(_id: u64, parent_path: &str, name: &str) -> ProviderResponse {
-    let full_path = if parent_path.is_empty() {
-        name.to_string()
-    } else {
-        format!("{parent_path}/{name}")
+    // TODO: extract path manipulation to helpers.
+    let full_path = match parent_path {
+        "" => name.to_string(),
+        p => format!("{p}/{name}"),
     };
 
     let Some(fs_path) = FsPath::parse(&full_path) else {
@@ -60,7 +60,7 @@ fn list_root() -> ProviderResponse {
 fn list_domain() -> ProviderResponse {
     let mut entries: Vec<DirEntry> = RecordType::all()
         .iter()
-        .map(|rt| mk_file(rt.as_str()))
+        .map(|rt| mk_file(rt.as_ref()))
         .collect();
     entries.push(mk_file("_all"));
     entries.push(mk_file("_raw"));
@@ -82,16 +82,14 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
             domain,
             rtype,
         } => {
-            let ctx = mk_ctx(resolver, domain);
             let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, rtype)) {
                 Ok(e) => e,
                 Err(e) => return err(&e),
             };
-            dispatch(id, Continuation::Single { ctx, rtype }, effect)
+            dispatch(id, Continuation::Single, effect)
         }
         FsPath::All { resolver, domain } => {
             let types = RecordType::common();
-            let ctx = mk_ctx(resolver, domain);
             let effects = match with_state(|s| {
                 types
                     .iter()
@@ -104,21 +102,24 @@ pub fn read_file(id: u64, path: &str) -> ProviderResponse {
             dispatch_batch(
                 id,
                 Continuation::All {
-                    ctx,
                     results: Vec::new(),
-                    pending_types: types.to_vec(),
                 },
                 effects,
             )
         }
         FsPath::Raw { resolver, domain } => {
-            let ctx = mk_ctx(resolver, domain);
             let effect =
                 match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A)) {
                     Ok(e) => e,
                     Err(e) => return err(&e),
                 };
-            dispatch(id, Continuation::Raw { ctx }, effect)
+            dispatch(
+                id,
+                Continuation::Raw {
+                    domain: domain.to_string(),
+                },
+                effect,
+            )
         }
         FsPath::ReverseIp { ip } => read_reverse_ip(id, None, ip),
         FsPath::DirectReverseIp { resolver, ip } => read_reverse_ip(id, resolver, ip),
@@ -133,25 +134,7 @@ fn read_reverse_ip(id: u64, resolver: Option<&str>, ip: &str) -> ProviderRespons
         Ok(effect) => effect,
         Err(e) => return err(&e),
     };
-    let ctx = QueryContext {
-        resolver: resolver.map(String::from),
-        domain: ip.to_string(),
-    };
-    dispatch(
-        id,
-        Continuation::Single {
-            ctx,
-            rtype: RecordType::PTR,
-        },
-        effect,
-    )
-}
-
-fn mk_ctx(resolver: Option<&str>, domain: &str) -> QueryContext {
-    QueryContext {
-        resolver: resolver.map(String::from),
-        domain: domain.to_string(),
-    }
+    dispatch(id, Continuation::Single, effect)
 }
 
 #[cfg(test)]

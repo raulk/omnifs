@@ -1,23 +1,53 @@
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use hashbrown::HashMap;
+use serde::Deserialize;
+
 use crate::omnifs::provider::types::*;
 use crate::path::RecordType;
 
 const CLOUDFLARE_DOH: &str = "https://cloudflare-dns.com/dns-query";
 const GOOGLE_DOH: &str = "https://dns.google/resolve";
 
+/// Validated `DoH` endpoint URL (always HTTPS).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Endpoint(String);
+
+impl Endpoint {
+    fn new(url: impl Into<String>) -> Result<Self, String> {
+        let url = url.into();
+        if !url.starts_with("https://") {
+            return Err(format!("DoH endpoint must use HTTPS: {url}"));
+        }
+        Ok(Self(url))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<&str> for Endpoint {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_str() == *other
+    }
+}
+
 /// Resolver aliases and their `DoH` endpoints, parsed from provider config.
 ///
-/// Example TOML:
+/// Example TOML (as received by the provider, [config] prefix stripped by host):
 /// ```toml
-/// [config]
 /// default_resolver = "cloudflare"
 ///
-/// [config.resolvers]
+/// [resolvers]
 /// cloudflare = { url = "https://cloudflare-dns.com/dns-query", aliases = ["1.1.1.1", "1.0.0.1"] }
-/// google = { url = "https://dns.google/resolve", aliases = ["8.8.8.8", "8.8.4.4", "dns.google"] }
-/// quad9 = { url = "https://dns.quad9.net:5053/dns-query", aliases = ["9.9.9.9"] }
 /// ```
 #[derive(Debug, Clone)]
 pub(crate) struct ResolverConfig {
@@ -28,22 +58,58 @@ pub(crate) struct ResolverConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolverEntry {
     pub name: String,
-    pub url: String,
+    pub url: Endpoint,
     pub aliases: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawConfig {
+    default_resolver: String,
+    #[serde(default)]
+    resolvers: HashMap<String, RawResolver>,
+}
+
+impl Default for RawConfig {
+    fn default() -> Self {
+        Self {
+            default_resolver: "cloudflare".to_string(),
+            resolvers: HashMap::new(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RawResolver {
+    url: String,
+    #[serde(default)]
+    aliases: Vec<String>,
 }
 
 impl ResolverConfig {
     pub fn from_toml(config_bytes: &[u8]) -> Self {
         let toml_str = std::str::from_utf8(config_bytes).unwrap_or("");
-        let mut parsed = parse_resolver_config(toml_str);
+        let raw: RawConfig = toml::from_str(toml_str).unwrap_or_default();
 
-        if parsed.resolvers.is_empty() {
-            parsed.resolvers = Self::builtin_defaults();
-        }
+        let resolvers: Vec<_> = raw
+            .resolvers
+            .into_iter()
+            .filter_map(|(name, r)| {
+                Some(ResolverEntry {
+                    name,
+                    url: Endpoint::new(r.url).ok()?,
+                    aliases: r.aliases,
+                })
+            })
+            .collect();
 
         Self {
-            default_name: parsed.default_name,
-            resolvers: parsed.resolvers,
+            default_name: raw.default_resolver,
+            resolvers: if resolvers.is_empty() {
+                Self::builtin_defaults()
+            } else {
+                resolvers
+            },
         }
     }
 
@@ -51,12 +117,12 @@ impl ResolverConfig {
         vec![
             ResolverEntry {
                 name: "cloudflare".to_string(),
-                url: CLOUDFLARE_DOH.to_string(),
+                url: Endpoint::new(CLOUDFLARE_DOH).expect("hardcoded URL"),
                 aliases: vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()],
             },
             ResolverEntry {
                 name: "google".to_string(),
-                url: GOOGLE_DOH.to_string(),
+                url: Endpoint::new(GOOGLE_DOH).expect("hardcoded URL"),
                 aliases: vec![
                     "8.8.8.8".to_string(),
                     "8.8.4.4".to_string(),
@@ -66,49 +132,38 @@ impl ResolverConfig {
         ]
     }
 
-    pub fn resolve_endpoint<'a>(&'a self, specifier: Option<&'a str>) -> &'a str {
+    pub fn resolve_endpoint(&self, specifier: Option<&str>) -> Endpoint {
         let Some(spec) = specifier else {
             return self.default_endpoint();
         };
 
-        // Raw URL passthrough.
-        if spec.starts_with("https") {
-            return spec;
-        }
-
-        for entry in &self.resolvers {
-            if entry.name == spec || entry.aliases.iter().any(|a| a == spec) {
-                return &entry.url;
-            }
-        }
-
-        self.default_endpoint()
+        Endpoint::new(spec)
+            .ok()
+            .or_else(|| self.lookup(spec))
+            .unwrap_or_else(|| self.default_endpoint())
     }
 
-    fn default_endpoint(&self) -> &str {
-        for entry in &self.resolvers {
-            if entry.name == self.default_name {
-                return &entry.url;
-            }
-        }
-        // Fallback if default_name doesn't match any entry.
+    fn lookup(&self, spec: &str) -> Option<Endpoint> {
         self.resolvers
-            .first()
-            .map_or(CLOUDFLARE_DOH, |e| e.url.as_str())
+            .iter()
+            .find(|e| e.name == spec || e.aliases.iter().any(|a| a == spec))
+            .map(|e| e.url.clone())
+    }
+
+    fn default_endpoint(&self) -> Endpoint {
+        self.lookup(&self.default_name)
+            .or_else(|| self.resolvers.first().map(|e| e.url.clone()))
+            .unwrap_or_else(|| Endpoint::new(CLOUDFLARE_DOH).expect("hardcoded URL"))
     }
 
     /// Format `_resolvers` file content from configured resolvers.
     pub fn format_resolvers_file(&self) -> String {
-        let mut out = String::new();
-        for entry in &self.resolvers {
-            let aliases = if entry.aliases.is_empty() {
-                String::new()
-            } else {
-                entry.aliases.join(",")
-            };
-            let _ = writeln!(out, "{}\t{}\t{}", entry.name, aliases, entry.url);
-        }
-        out
+        self.resolvers
+            .iter()
+            .map(|e| format!("{}\t{}\t{}", e.name, e.aliases.join(","), e.url))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
     }
 
     /// Resolver names prefixed with `@` for directory listing.
@@ -120,249 +175,6 @@ impl ResolverConfig {
     }
 }
 
-struct ParsedResolverConfig {
-    default_name: String,
-    resolvers: Vec<ResolverEntry>,
-}
-
-#[derive(Default)]
-struct ResolverBuilder {
-    name: String,
-    url: Option<String>,
-    aliases: Vec<String>,
-}
-
-impl ResolverBuilder {
-    fn into_entry(self) -> Option<ResolverEntry> {
-        Some(ResolverEntry {
-            name: self.name,
-            url: self.url?,
-            aliases: self.aliases,
-        })
-    }
-}
-
-#[derive(Default)]
-enum ConfigSection {
-    #[default]
-    Root,
-    Resolvers,
-    ResolverTable,
-    Other,
-}
-
-fn parse_resolver_config(input: &str) -> ParsedResolverConfig {
-    let mut parsed = ParsedResolverConfig {
-        default_name: "cloudflare".to_string(),
-        resolvers: Vec::new(),
-    };
-    let mut section = ConfigSection::Root;
-    let mut current_resolver: Option<ResolverBuilder> = None;
-
-    for raw_line in input.lines() {
-        let line = strip_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        if let Some(section_name) = parse_section(line) {
-            flush_resolver(&mut parsed.resolvers, &mut current_resolver);
-            if section_name == "resolvers" {
-                section = ConfigSection::Resolvers;
-            } else if let Some(name) = section_name.strip_prefix("resolvers.") {
-                current_resolver = Some(ResolverBuilder {
-                    name: parse_key(name),
-                    ..ResolverBuilder::default()
-                });
-                section = ConfigSection::ResolverTable;
-            } else {
-                section = ConfigSection::Other;
-            }
-            continue;
-        }
-
-        let Some((key, value)) = split_key_value(line) else {
-            continue;
-        };
-
-        match section {
-            ConfigSection::Root => {
-                if key == "default_resolver"
-                    && let Some(default_name) = parse_string(value)
-                {
-                    parsed.default_name = default_name;
-                }
-            }
-            ConfigSection::Resolvers => {
-                if let Some(entry) = parse_inline_resolver(key, value) {
-                    parsed.resolvers.push(entry);
-                }
-            }
-            ConfigSection::ResolverTable => {
-                if let Some(builder) = current_resolver.as_mut() {
-                    match key {
-                        "url" => builder.url = parse_string(value),
-                        "aliases" => builder.aliases = parse_string_array(value),
-                        _ => {}
-                    }
-                }
-            }
-            ConfigSection::Other => {}
-        }
-    }
-
-    flush_resolver(&mut parsed.resolvers, &mut current_resolver);
-    parsed
-}
-
-fn flush_resolver(entries: &mut Vec<ResolverEntry>, builder: &mut Option<ResolverBuilder>) {
-    if let Some(entry) = builder.take().and_then(ResolverBuilder::into_entry) {
-        entries.push(entry);
-    }
-}
-
-fn parse_section(line: &str) -> Option<&str> {
-    line.strip_prefix('[')?.strip_suffix(']').map(str::trim)
-}
-
-fn split_key_value(line: &str) -> Option<(&str, &str)> {
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, ch) in line.char_indices() {
-        match ch {
-            '\\' if in_string => escaped = !escaped,
-            '"' if !escaped => in_string = !in_string,
-            '=' if !in_string => {
-                return Some((line[..index].trim(), line[index + 1..].trim()));
-            }
-            _ => escaped = false,
-        }
-    }
-
-    None
-}
-
-fn strip_comment(line: &str) -> &str {
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, ch) in line.char_indices() {
-        match ch {
-            '\\' if in_string => escaped = !escaped,
-            '"' if !escaped => in_string = !in_string,
-            '#' if !in_string => return &line[..index],
-            _ => escaped = false,
-        }
-    }
-
-    line
-}
-
-fn parse_key(key: &str) -> String {
-    parse_string(key).unwrap_or_else(|| key.trim().to_string())
-}
-
-fn parse_string(value: &str) -> Option<String> {
-    let value = value.trim();
-    let rest = value.strip_prefix('"')?;
-    let mut parsed = String::new();
-    let mut escaped = false;
-
-    for ch in rest.chars() {
-        if escaped {
-            match ch {
-                '"' => parsed.push('"'),
-                '\\' => parsed.push('\\'),
-                'n' => parsed.push('\n'),
-                'r' => parsed.push('\r'),
-                't' => parsed.push('\t'),
-                other => parsed.push(other),
-            }
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Some(parsed);
-        } else {
-            parsed.push(ch);
-        }
-    }
-
-    None
-}
-
-fn parse_string_array(value: &str) -> Vec<String> {
-    let Some(inner) = value
-        .trim()
-        .strip_prefix('[')
-        .and_then(|v| v.strip_suffix(']'))
-    else {
-        return Vec::new();
-    };
-
-    split_comma_separated(inner)
-        .into_iter()
-        .filter_map(parse_string)
-        .collect()
-}
-
-fn parse_inline_resolver(key: &str, value: &str) -> Option<ResolverEntry> {
-    let inner = value
-        .trim()
-        .strip_prefix('{')
-        .and_then(|v| v.strip_suffix('}'))?;
-    let mut builder = ResolverBuilder {
-        name: parse_key(key),
-        ..ResolverBuilder::default()
-    };
-
-    for field in split_comma_separated(inner) {
-        let Some((field_name, field_value)) = split_key_value(field) else {
-            continue;
-        };
-        match field_name {
-            "url" => builder.url = parse_string(field_value),
-            "aliases" => builder.aliases = parse_string_array(field_value),
-            _ => {}
-        }
-    }
-
-    builder.into_entry()
-}
-
-fn split_comma_separated(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut depth = 0_u32;
-
-    for (index, ch) in input.char_indices() {
-        match ch {
-            '\\' if in_string => escaped = !escaped,
-            '"' if !escaped => in_string = !in_string,
-            '[' | '{' if !in_string => {
-                depth = depth.saturating_add(1);
-                escaped = false;
-            }
-            ']' | '}' if !in_string => {
-                depth = depth.saturating_sub(1);
-                escaped = false;
-            }
-            ',' if !in_string && depth == 0 => {
-                parts.push(input[start..index].trim());
-                start = index + 1;
-                escaped = false;
-            }
-            _ => escaped = false,
-        }
-    }
-
-    parts.push(input[start..].trim());
-    parts
-}
-
 pub(crate) fn query(
     config: &ResolverConfig,
     resolver: Option<&str>,
@@ -370,8 +182,9 @@ pub(crate) fn query(
     rtype: RecordType,
 ) -> SingleEffect {
     let endpoint = config.resolve_endpoint(resolver);
-    let sep = if endpoint.contains('?') { '&' } else { '?' };
-    let url = format!("{endpoint}{sep}name={domain}&type={}", rtype.as_str());
+    let ep = endpoint.as_str();
+    let sep = if ep.contains('?') { '&' } else { '?' };
+    let url = format!("{ep}{sep}name={domain}&type={rtype}");
 
     SingleEffect::Fetch(HttpRequest {
         method: "GET".to_string(),

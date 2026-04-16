@@ -8,7 +8,7 @@ RUN apt-get update \
         fuse3 libfuse3-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked \
-    && cargo install cargo-component --locked \
+    && cargo install wasm-tools --locked \
     && rustup target add wasm32-wasip1
 
 # --- Dependency cache (host crates) ---
@@ -30,13 +30,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM toolchain AS providers
 WORKDIR /src
 COPY . .
+COPY build/wasi_snapshot_preview1.reactor.wasm /tmp/wasi_adapter.wasm
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    cargo component build \
-        --manifest-path providers/github/Cargo.toml \
-        --release --target-dir /src/target \
-    && cargo component build \
-        --manifest-path providers/dns/Cargo.toml \
-        --release --target-dir /src/target
+    cargo build \
+        -p omnifs-provider-github -p omnifs-provider-dns \
+        --target wasm32-wasip1 --release --target-dir /src/target \
+    && for wasm in /src/target/wasm32-wasip1/release/omnifs_provider_*.wasm; do \
+        wasm-tools component new "$wasm" \
+            --adapt "wasi_snapshot_preview1=/tmp/wasi_adapter.wasm" \
+            -o "$wasm"; \
+    done
 
 # --- Build host binary ---
 

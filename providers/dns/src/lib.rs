@@ -23,26 +23,10 @@ pub(crate) struct ProviderState {
     pub resolvers: doh::ResolverConfig,
 }
 
-pub(crate) struct QueryContext {
-    #[allow(dead_code)]
-    pub resolver: Option<String>,
-    pub domain: String,
-}
-
-#[allow(dead_code)]
 enum Continuation {
-    Single {
-        ctx: QueryContext,
-        rtype: RecordType,
-    },
-    All {
-        ctx: QueryContext,
-        results: Vec<DnsRecord>,
-        pending_types: Vec<RecordType>,
-    },
-    Raw {
-        ctx: QueryContext,
-    },
+    Single,
+    All { results: Vec<DnsRecord> },
+    Raw { domain: String },
 }
 
 #[derive(Clone, Debug)]

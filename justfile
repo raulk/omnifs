@@ -15,9 +15,14 @@ check-providers:
 build-providers:
     #!/usr/bin/env bash
     set -euo pipefail
-    for manifest in providers/*/Cargo.toml; do
-        grep -q '^\[package\]' "$manifest" || continue
-        cargo component build --manifest-path "$manifest" --release --target-dir target
+    adapter="build/wasi_snapshot_preview1.reactor.wasm"
+    cargo build --target wasm32-wasip1 --release \
+        -p omnifs-provider-github -p omnifs-provider-dns -p test-provider
+    for wasm in target/wasm32-wasip1/release/omnifs_provider_*.wasm target/wasm32-wasip1/release/test_provider.wasm; do
+        [ -f "$wasm" ] || continue
+        wasm-tools component new "$wasm" \
+            --adapt "wasi_snapshot_preview1=$adapter" \
+            -o "$wasm"
     done
 
 test: build-providers
