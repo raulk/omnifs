@@ -84,6 +84,7 @@ struct PathMethod {
 struct ClassifiedMethods {
     init: Option<InitMethod>,
     capabilities: Option<ImplItemFn>,
+    config_schema: Option<ImplItemFn>,
     resume: Option<ResumeMethod>,
     on_event: Option<ImplItemFn>,
     routes: Vec<PathMethod>,
@@ -208,6 +209,7 @@ fn extract_continuation_type(func: &ImplItemFn) -> Result<Type, syn::Error> {
 fn classify_methods(items: Vec<ImplItem>) -> Result<ClassifiedMethods, syn::Error> {
     let mut init = None;
     let mut capabilities = None;
+    let mut config_schema = None;
     let mut resume = None;
     let mut on_event = None;
     let mut routes = Vec::new();
@@ -285,6 +287,9 @@ fn classify_methods(items: Vec<ImplItem>) -> Result<ClassifiedMethods, syn::Erro
             "capabilities" => {
                 capabilities = Some(func);
             }
+            "get_config_schema" => {
+                config_schema = Some(func);
+            }
             "resume" => {
                 let continuation_type = extract_continuation_type(&func)?;
                 resume = Some(ResumeMethod {
@@ -304,6 +309,7 @@ fn classify_methods(items: Vec<ImplItem>) -> Result<ClassifiedMethods, syn::Erro
     Ok(ClassifiedMethods {
         init,
         capabilities,
+        config_schema,
         resume,
         on_event,
         routes,
@@ -441,9 +447,15 @@ fn generate_lifecycle_impl(
     type_name: &Ident,
     init: &InitMethod,
     _capabilities: &ImplItemFn,
+    has_config_schema: bool,
     cont_type: &Type,
 ) -> TokenStream2 {
     let config_type = &init.config_type;
+    let config_schema_body = if has_config_schema {
+        quote! { #type_name::get_config_schema() }
+    } else {
+        quote! { omnifs_sdk::prelude::ConfigSchema { fields: vec![] } }
+    };
 
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::lifecycle::Guest for #type_name {
@@ -481,7 +493,7 @@ fn generate_lifecycle_impl(
             }
 
             fn get_config_schema() -> omnifs_sdk::prelude::ConfigSchema {
-                omnifs_sdk::prelude::ConfigSchema { fields: vec![] }
+                #config_schema_body
             }
         }
 
@@ -717,17 +729,21 @@ fn provider_impl(input: ItemImpl) -> Result<TokenStream2, syn::Error> {
     // Collect all original method definitions into an impl block
     let init_func = &init.func;
     let caps_func = caps;
+    let config_schema_func = classified.config_schema.as_ref();
     let resume_func = &resume_method.func;
     let on_event_func = classified.on_event.as_ref();
     let helper_funcs = &classified.helpers;
     let route_funcs: Vec<&ImplItemFn> = classified.routes.iter().map(|r| &r.func).collect();
 
     let on_event_tokens: Vec<TokenStream2> = on_event_func.iter().map(|f| quote! { #f }).collect();
+    let config_schema_tokens: Vec<TokenStream2> =
+        config_schema_func.iter().map(|f| quote! { #f }).collect();
 
     let impl_block = quote! {
         impl #type_name {
             #init_func
             #caps_func
+            #(#config_schema_tokens)*
             #resume_func
             #(#on_event_tokens)*
             #(#route_funcs)*
@@ -746,7 +762,13 @@ fn provider_impl(input: ItemImpl) -> Result<TokenStream2, syn::Error> {
     let dispatch_chain = generate_dispatch_chain(&classified.routes);
 
     // Generate WIT trait impls
-    let lifecycle_impl = generate_lifecycle_impl(&type_name, init, caps, cont_type);
+    let lifecycle_impl = generate_lifecycle_impl(
+        &type_name,
+        init,
+        caps,
+        classified.config_schema.is_some(),
+        cont_type,
+    );
     let browse_impl = generate_browse_impl(&type_name);
     let notify_impl = generate_notify_impl(&type_name, classified.on_event.is_some());
     let reconcile_impl = generate_reconcile_impl(&type_name);

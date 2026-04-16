@@ -61,6 +61,27 @@ impl DnsProvider {
         )
     }
 
+    fn get_config_schema() -> ConfigSchema {
+        ConfigSchema {
+            fields: vec![
+                ConfigField {
+                    name: "default_resolver".to_string(),
+                    field_type: "string".to_string(),
+                    required: false,
+                    default_value: Some("cloudflare".to_string()),
+                    description: "Default resolver alias used when no @resolver prefix".to_string(),
+                },
+                ConfigField {
+                    name: "resolvers".to_string(),
+                    field_type: "table".to_string(),
+                    required: false,
+                    default_value: None,
+                    description: "Named resolver aliases mapping to DoH endpoint URLs".to_string(),
+                },
+            ],
+        }
+    }
+
     fn capabilities() -> RequestedCapabilities {
         RequestedCapabilities {
             domains: vec!["cloudflare-dns.com".to_string(), "dns.google".to_string()],
