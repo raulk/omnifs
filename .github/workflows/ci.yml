@@ -189,7 +189,7 @@ jobs:
             ${{ env.DOCKER_IMAGE_NAME }}:latest
 
           for _ in $(seq 1 60); do
-            if docker exec omnifs-smoke sh -lc "grep -qs ' /github ' /proc/mounts"; then
+            if docker exec omnifs-smoke sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
               exit 0
             fi
 
@@ -260,7 +260,7 @@ jobs:
           docker compose -f compose.yaml -f compose.ci.yaml up --build -d
 
           for _ in $(seq 1 60); do
-            if docker compose exec -T omnifs sh -lc "grep -qs ' /github ' /proc/mounts"; then
+            if docker compose exec -T omnifs sh -lc "grep -qs ' /omnifs ' /proc/mounts"; then
               exit 0
             fi
 
