@@ -3,12 +3,13 @@
 //! Handles fetching and serving specific resource files (title, body,
 //! comments, diffs) with stale-on-error caching.
 
-use super::{dispatch, enter_cache_only, err, is_unauthorized, with_state};
+use super::{dispatch, enter_cache_only, err, is_unauthorized};
 use crate::Continuation;
 use crate::api;
-use crate::omnifs::provider::types::DirListing;
-use crate::omnifs::provider::types::*;
-use crate::path::{FsPath, ResourceFile, ResourceKind, RunFile};
+use crate::path::FsPath;
+use crate::types::{ResourceFile, ResourceKind, RunFile};
+use crate::with_state;
+use omnifs_sdk::prelude::*;
 
 pub fn resume_resource(path: &str, result: &SingleEffectResult) -> ProviderResponse {
     match FsPath::parse(path) {

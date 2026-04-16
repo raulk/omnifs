@@ -59,7 +59,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run core clippy
-        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
+        run: cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk -- -D warnings
 
       - name: Run provider clippy
         run: cargo clippy -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip1 -- -D warnings
@@ -86,10 +86,10 @@ jobs:
           shared-key: omnifs-rust-v1
           cache-on-failure: true
 
-      - name: Install cargo-component
+      - name: Install wasm-tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-component
+          tool: wasm-tools
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -99,12 +99,21 @@ jobs:
       - name: Build providers
         run: |
           set -euo pipefail
-          for manifest in providers/*/Cargo.toml; do
-            cargo component build --manifest-path "$manifest" --release --target-dir target
+          adapter="build/wasi_snapshot_preview1.reactor.wasm"
+          cargo build --target wasm32-wasip1 --release \
+              -p omnifs-provider-github -p omnifs-provider-dns -p test-provider
+          for wasm in target/wasm32-wasip1/release/omnifs_provider_*.wasm target/wasm32-wasip1/release/test_provider.wasm; do
+              [ -f "$wasm" ] || continue
+              wasm-tools component new "$wasm" \
+                  --adapt "wasi_snapshot_preview1=$adapter" \
+                  -o "$wasm"
           done
 
       - name: Run core tests
-        run: cargo nextest run --release -p omnifs-cli -p omnifs-host
+        run: cargo nextest run --release -p omnifs-cli -p omnifs-host -p omnifs-sdk
+
+      - name: Check provider test compilation
+        run: cargo test -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip1 --no-run
 
       - name: Build CLI release binary
         run: cargo build --release -p omnifs-cli

@@ -3,12 +3,14 @@
 //! Handles listing cached repos, fetching search results for issues/PRs,
 //! and paginating through GitHub API responses.
 
-use super::{dispatch, enter_cache_only, err, is_unauthorized, with_state};
+use super::{dispatch, enter_cache_only, err, is_unauthorized};
 use crate::api;
-use crate::omnifs::provider::types::*;
-use crate::path::{FsPath, ResourceKind, StateFilter};
+use crate::path::FsPath;
+use crate::types::{ResourceKind, StateFilter};
+use crate::with_state;
 use crate::{Continuation, SingleEffect};
 use hashbrown::HashSet;
+use omnifs_sdk::prelude::*;
 
 pub fn resume_cached_repos(
     path: &str,
@@ -191,8 +193,8 @@ pub fn resume_owner_profile(
         .map(|page| crate::api::github_get(&format!("{repos_path}&page={page}")))
         .collect();
 
-    match with_state(|state| {
-        state.pending.insert(
+    match crate::with_pending(|p| {
+        p.insert(
             id,
             Continuation::FetchingRepoPages {
                 path: path.to_string(),
@@ -396,8 +398,8 @@ pub fn resume_list_first_page(
                 .map(|page| api::github_get(&format!("{base}&page={page}")))
                 .collect();
 
-            match with_state(|state| {
-                state.pending.insert(
+            match crate::with_pending(|p| {
+                p.insert(
                     id,
                     Continuation::FetchingRemainingPages {
                         path: path.to_string(),

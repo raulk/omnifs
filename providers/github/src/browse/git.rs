@@ -4,7 +4,7 @@
 //! and returns `DisownedTree` to hand the subtree to FUSE passthrough.
 
 use super::err;
-use crate::omnifs::provider::types::*;
+use omnifs_sdk::prelude::*;
 
 /// Resume after `OpenRepo`. Returns `DisownedTree` to hand the subtree to FUSE passthrough.
 pub fn resume_open_repo_disown(_id: u64, result: &SingleEffectResult) -> ProviderResponse {

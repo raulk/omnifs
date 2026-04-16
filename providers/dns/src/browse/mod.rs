@@ -1,85 +1,23 @@
 use std::fmt::Write;
 
+use omnifs_sdk::prelude::*;
+
 use crate::doh;
-use crate::omnifs::provider::types::*;
 use crate::{Continuation, DnsRecord, with_state};
-
-mod routing;
-
-pub use routing::{list_children, lookup_child, read_file};
-
-pub(crate) fn err(msg: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::Err(msg.to_string()))
-}
-
-pub(crate) fn dispatch(id: u64, cont: Continuation, effect: SingleEffect) -> ProviderResponse {
-    with_state(|s| s.pending.insert(id, cont))
-        .map_or_else(|e| err(&e), |_| ProviderResponse::Effect(effect))
-}
-
-pub(crate) fn dispatch_batch(
-    id: u64,
-    cont: Continuation,
-    effects: Vec<SingleEffect>,
-) -> ProviderResponse {
-    with_state(|s| s.pending.insert(id, cont))
-        .map_or_else(|e| err(&e), |_| ProviderResponse::Batch(effects))
-}
-
-pub(crate) fn mk_dir(name: impl Into<String>) -> DirEntry {
-    DirEntry {
-        name: name.into(),
-        kind: EntryKind::Directory,
-        size: None,
-        projected_files: None,
-    }
-}
-
-pub(crate) fn mk_file(name: impl Into<String>) -> DirEntry {
-    DirEntry {
-        name: name.into(),
-        kind: EntryKind::File,
-        size: Some(4096),
-        projected_files: None,
-    }
-}
-
-pub(crate) fn dir_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(mk_dir(name))))
-}
-
-pub(crate) fn file_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(mk_file(name))))
-}
-
-pub(crate) fn resolvers_content() -> ProviderResponse {
-    let content = with_state(|s| s.resolvers.format_resolvers_file()).unwrap_or_default();
-    ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
-}
-
-pub(crate) fn resolver_dir_names() -> Vec<String> {
-    with_state(|s| s.resolvers.resolver_dir_names()).unwrap_or_default()
-}
 
 // --- Resume dispatch ---
 
 #[allow(clippy::needless_pass_by_value)]
-pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
-    let continuation = match with_state(|s| s.pending.remove(&id)) {
-        Ok(Some(c)) => c,
-        Ok(None) => return err("no pending continuation"),
-        Err(e) => return err(&e),
-    };
-
-    match continuation {
-        Continuation::Single => resume_single(&effect_outcome),
-        Continuation::All { results } => resume_all(results, &effect_outcome),
-        Continuation::Raw { domain } => resume_raw(&domain, &effect_outcome),
+pub fn resume(_id: u64, cont: Continuation, outcome: EffectResult) -> ProviderResponse {
+    match cont {
+        Continuation::Single => resume_single(&outcome),
+        Continuation::All { results } => resume_all(results, &outcome),
+        Continuation::Raw { domain } => resume_raw(&domain, &outcome),
     }
 }
 
 fn resume_single(outcome: &EffectResult) -> ProviderResponse {
-    let body = match extract_http_body(outcome) {
+    let body = match extract_body(outcome) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -108,7 +46,7 @@ fn resume_all(mut accumulated: Vec<DnsRecord>, outcome: &EffectResult) -> Provid
 }
 
 fn resume_raw(domain: &str, outcome: &EffectResult) -> ProviderResponse {
-    let body = match extract_http_body(outcome) {
+    let body = match extract_body(outcome) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -129,11 +67,11 @@ fn resume_raw(domain: &str, outcome: &EffectResult) -> ProviderResponse {
 
 // --- Helpers ---
 
-fn file_content(s: String) -> ProviderResponse {
+pub(crate) fn file_content(s: String) -> ProviderResponse {
     ProviderResponse::Done(ActionResult::FileContent(s.into_bytes()))
 }
 
-fn extract_http_body(outcome: &EffectResult) -> Result<&[u8], ProviderResponse> {
+fn extract_body(outcome: &EffectResult) -> Result<&[u8], ProviderResponse> {
     let result = match outcome {
         EffectResult::Single(r) => r,
         EffectResult::Batch(v) if !v.is_empty() => &v[0],
@@ -147,7 +85,16 @@ fn extract_http_body(outcome: &EffectResult) -> Result<&[u8], ProviderResponse> 
     }
 }
 
-fn format_records(records: &[DnsRecord]) -> String {
+pub(crate) fn resolvers_content() -> ProviderResponse {
+    let content = with_state(|s| s.resolvers.format_resolvers_file()).unwrap_or_default();
+    ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
+}
+
+pub(crate) fn resolver_dir_names() -> Vec<String> {
+    with_state(|s| s.resolvers.resolver_dir_names()).unwrap_or_default()
+}
+
+pub(crate) fn format_records(records: &[DnsRecord]) -> String {
     if records.is_empty() {
         return "\n".to_string();
     }
@@ -159,7 +106,7 @@ fn format_records(records: &[DnsRecord]) -> String {
         + "\n"
 }
 
-fn format_all_records(records: &[DnsRecord]) -> String {
+pub(crate) fn format_all_records(records: &[DnsRecord]) -> String {
     if records.is_empty() {
         return ";; no records\n".to_string();
     }

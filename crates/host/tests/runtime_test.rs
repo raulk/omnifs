@@ -139,6 +139,7 @@ async fn test_lookup_child_not_found() {
 async fn test_effect_resume_loop() {
     let engine = make_engine();
     let rt = make_runtime(&engine);
+    rt.initialize(b"").unwrap();
     let result = rt.call_read_file("hello/cached").await.unwrap();
     match result {
         ActionResult::FileContent(data) => {

@@ -2,7 +2,7 @@
 //!
 //! Helper functions to construct GitHub API requests and parse JSON responses.
 
-use crate::omnifs::provider::types::*;
+use omnifs_sdk::prelude::*;
 
 /// Build an HTTP GET request for the GitHub API.
 pub fn github_get(path: &str) -> SingleEffect {

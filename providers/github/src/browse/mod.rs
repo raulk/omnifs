@@ -1,10 +1,11 @@
-//! Browse module: filesystem routing and async continuations.
+//! Browse module: async continuations and shared helpers.
 //!
-//! Routes provider browse requests to the appropriate handlers and manages
-//! the async continuation state machine for GitHub API operations.
+//! Routes are now handled by the `#[route]` handlers in `lib.rs`.
+//! This module manages the resume state machine for GitHub API operations.
 
-use crate::omnifs::provider::types::*;
-use crate::{Continuation, SingleEffect, SingleEffectResult, with_state};
+use crate::Continuation;
+use crate::with_state;
+use omnifs_sdk::prelude::*;
 
 pub const MAX_CONTENT_SIZE: usize = 10 * 1024 * 1024;
 const TRUNCATION_MARKER: &[u8] = b"\n[truncated at 10MB]\n";
@@ -16,38 +17,21 @@ mod events;
 mod files;
 mod git;
 mod resources;
-mod routing;
 
-// Re-exports
 pub use events::timer_tick;
-pub use routing::{list_children, lookup_child, read_file};
 
 // Re-export types needed by submodules
 pub(crate) use crate::CachedRepoListMode;
 
-/// Path structure:
-///   ""                         -> list owners (from cache)
-///   "<owner>"                  -> list repos
-///   "<owner>/<repo>"           -> list namespace dirs: _repo, _issues, _prs, _actions
-///   "<owner>/<repo>/_repo/..." -> git tree browsing
-///   "<owner>/<repo>/_issues/_open/<num>/..." -> issue files
-///   "<owner>/<repo>/_prs/_open/<num>/..."    -> PR files
-///   "<owner>/<repo>/_actions/runs/<id>/..."  -> action run files
-#[allow(clippy::needless_pass_by_value)] // EffectResult is owned from the WIT trait boundary
-pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
-    let continuation = match with_state(|state| state.pending.remove(&id)) {
-        Ok(Some(c)) => c,
-        Ok(None) => return err("no pending continuation"),
-        Err(e) => return err(&e),
-    };
-
+#[allow(clippy::needless_pass_by_value)]
+pub fn resume(id: u64, cont: Continuation, effect_outcome: EffectResult) -> ProviderResponse {
     let result = match &effect_outcome {
         EffectResult::Single(r) => r,
         EffectResult::Batch(results) if !results.is_empty() => &results[0],
         EffectResult::Batch(_) => return err("empty batch result"),
     };
 
-    match continuation {
+    match cont {
         Continuation::ListingCachedRepos { path, mode } => {
             resources::resume_cached_repos(&path, &mode, result)
         }
@@ -89,10 +73,8 @@ pub(crate) fn err(msg: &str) -> ProviderResponse {
 }
 
 pub(crate) fn dispatch(id: u64, cont: Continuation, effect: SingleEffect) -> ProviderResponse {
-    match with_state(|state| {
-        state.pending.insert(id, cont);
-    }) {
-        Ok(()) => ProviderResponse::Effect(effect),
+    match crate::with_pending(|p| p.insert(id, cont)) {
+        Ok(_) => ProviderResponse::Effect(effect),
         Err(e) => err(&e),
     }
 }
@@ -115,7 +97,7 @@ pub(crate) fn is_unauthorized(result: &SingleEffectResult) -> bool {
 }
 
 pub(crate) fn touch_repo(owner: &str, repo: &str) {
-    if !crate::path::is_safe_segment(owner) || !crate::path::is_safe_segment(repo) {
+    if !crate::types::is_safe_segment(owner) || !crate::types::is_safe_segment(repo) {
         return;
     }
     let _ = with_state(|state| {
@@ -139,8 +121,6 @@ pub(crate) fn extract_http_body(result: &SingleEffectResult) -> Result<&[u8], Pr
     }
 }
 
-/// Track X-RateLimit-Remaining from GitHub API responses. Stores the
-/// value in `ProviderState` and logs a warning via the host when low.
 pub(crate) fn check_rate_limit(resp: &HttpResponse) {
     let Some(remaining) = http_header_value(resp, "x-ratelimit-remaining")
         .and_then(|value| value.parse::<u32>().ok())
@@ -162,7 +142,7 @@ pub(crate) fn check_rate_limit(resp: &HttpResponse) {
             }
             None => format!("GitHub API {resource} rate limit low: {remaining} remaining"),
         };
-        crate::omnifs::provider::log::log(&LogEntry {
+        omnifs_sdk::omnifs::provider::log::log(&LogEntry {
             level: LogLevel::Warn,
             message,
         });

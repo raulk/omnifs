@@ -2,10 +2,9 @@ use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use hashbrown::HashMap;
-use serde::Deserialize;
 
-use crate::omnifs::provider::types::*;
-use crate::path::RecordType;
+use crate::types::RecordType;
+use omnifs_sdk::prelude::*;
 
 const CLOUDFLARE_DOH: &str = "https://cloudflare-dns.com/dns-query";
 const GOOGLE_DOH: &str = "https://dns.google/resolve";
@@ -62,34 +61,62 @@ pub(crate) struct ResolverEntry {
     pub aliases: Vec<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(default)]
-struct RawConfig {
-    default_resolver: String,
-    #[serde(default)]
-    resolvers: HashMap<String, RawResolver>,
-}
+impl ResolverConfig {
+    /// Build from already-deserialized config maps (called from `init`).
+    pub fn from_config(
+        default_resolver: String,
+        raw_resolvers: HashMap<String, crate::ConfigResolver>,
+    ) -> Self {
+        let resolvers: Vec<_> = raw_resolvers
+            .into_iter()
+            .filter_map(|(name, r)| {
+                Some(ResolverEntry {
+                    name,
+                    url: Endpoint::new(r.url).ok()?,
+                    aliases: r.aliases,
+                })
+            })
+            .collect();
 
-impl Default for RawConfig {
-    fn default() -> Self {
         Self {
-            default_resolver: "cloudflare".to_string(),
-            resolvers: HashMap::new(),
+            default_name: default_resolver,
+            resolvers: if resolvers.is_empty() {
+                Self::builtin_defaults()
+            } else {
+                resolvers
+            },
         }
     }
-}
 
-#[derive(serde::Deserialize)]
-struct RawResolver {
-    url: String,
-    #[serde(default)]
-    aliases: Vec<String>,
-}
-
-impl ResolverConfig {
+    /// Build from raw TOML bytes (used by tests only).
+    #[cfg(test)]
     pub fn from_toml(config_bytes: &[u8]) -> Self {
+        #[derive(serde::Deserialize)]
+        #[serde(default)]
+        struct RawConfig {
+            default_resolver: String,
+            #[serde(default)]
+            resolvers: HashMap<String, RawResolver>,
+        }
+
+        impl Default for RawConfig {
+            fn default() -> Self {
+                Self {
+                    default_resolver: "cloudflare".to_string(),
+                    resolvers: HashMap::new(),
+                }
+            }
+        }
+
+        #[derive(serde::Deserialize)]
+        struct RawResolver {
+            url: String,
+            #[serde(default)]
+            aliases: Vec<String>,
+        }
+
         let toml_str = std::str::from_utf8(config_bytes).unwrap_or("");
-        let raw: RawConfig = toml::from_str(toml_str).unwrap_or_default();
+        let raw: RawConfig = omnifs_sdk::toml::from_str(toml_str).unwrap_or_default();
 
         let resolvers: Vec<_> = raw
             .resolvers

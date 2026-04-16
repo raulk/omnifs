@@ -2736,11 +2736,10 @@ name = "omnifs-provider-dns"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.15.5",
+ "omnifs-sdk",
  "serde",
  "serde_json",
  "strum",
- "toml 0.8.23",
- "wit-bindgen 0.41.0",
 ]
 
 [[package]]
@@ -2748,11 +2747,31 @@ name = "omnifs-provider-github"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.15.5",
+ "omnifs-sdk",
  "rc-zip-sync",
  "serde",
  "serde_json",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "omnifs-sdk"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.15.5",
+ "omnifs-sdk-macros",
+ "serde",
+ "toml 0.8.23",
  "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "omnifs-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -3899,7 +3918,8 @@ dependencies = [
 name = "test-provider"
 version = "0.1.0"
 dependencies = [
- "wit-bindgen 0.41.0",
+ "omnifs-sdk",
+ "serde",
 ]
 
 [[package]]

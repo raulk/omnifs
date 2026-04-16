@@ -3,11 +3,12 @@
 //! Handles periodic cache refresh, event polling via `ETags`, and cache
 //! invalidation based on repository activity.
 
-use super::{enter_cache_only, err, truncate_content, with_state};
+use super::{enter_cache_only, err, truncate_content};
 use crate::Continuation;
 use crate::api;
-use crate::omnifs::provider::types::*;
 use crate::path::FsPath;
+use crate::with_state;
+use omnifs_sdk::prelude::*;
 
 pub fn timer_tick(id: u64) -> ProviderResponse {
     let pending_invalidations =
@@ -49,8 +50,8 @@ pub fn timer_tick(id: u64) -> ProviderResponse {
         return ProviderResponse::Done(ActionResult::Ok);
     }
 
-    match with_state(|state| {
-        state.pending.insert(
+    match crate::with_pending(|p| {
+        p.insert(
             id,
             Continuation::FetchingEvents {
                 repos,
@@ -105,7 +106,7 @@ pub fn resume_events(
     // The first repos.len() results correspond to event fetches;
     // the trailing invalidation_count results are CacheOk acks (ignore).
     if all_results.len() != repos.len() + invalidation_count {
-        crate::omnifs::provider::log::log(&LogEntry {
+        omnifs_sdk::omnifs::provider::log::log(&LogEntry {
             level: LogLevel::Warn,
             message: format!(
                 "resume_events: result count mismatch: {} results, {} repos, {} invalidations",
