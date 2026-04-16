@@ -6,7 +6,7 @@ pub use crate::helpers::{dir_entry, err, file_entry, mk_dir, mk_file};
 pub use crate::http::extract_http_body;
 
 // Proc macros (invoked as #[omnifs_sdk::provider] and #[route("...")])
-pub use omnifs_sdk_macros::{provider, route};
+pub use omnifs_sdk_macros::{config, provider, route};
 
 // Common deps re-exported so providers don't need direct dependencies
 pub use hashbrown::HashMap;

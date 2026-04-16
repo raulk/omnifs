@@ -8,7 +8,6 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 omnifs-sdk = { path = "../../crates/omnifs-sdk" }
-serde = { version = "1", features = ["derive"] }
 
 [package.metadata.component]
 package = "omnifs:provider"

@@ -85,28 +85,32 @@ COPY scripts/container-entrypoint.sh /usr/local/bin/omnifs-container-entrypoint
 RUN chmod 0755 /tmp/demo.sh /usr/local/bin/omnifs-container-entrypoint \
     && mkdir -p /root/.omnifs/plugins /root/.omnifs/providers
 
-RUN cat > /root/.omnifs/providers/github.toml <<'CONF'
-plugin = "omnifs_provider_github.wasm"
-mount = "github"
-
-[auth]
-type = "bearer-token"
-token_env = "GITHUB_TOKEN"
-token_file = "/run/secrets/github_token"
-
-[capabilities]
-domains = ["api.github.com"]
-git_repos = ["git@github.com:*"]
-max_memory_mb = 256
+RUN cat > /root/.omnifs/providers/github.json <<'CONF'
+{
+  "plugin": "omnifs_provider_github.wasm",
+  "mount": "github",
+  "auth": {
+    "type": "bearer-token",
+    "token_env": "GITHUB_TOKEN",
+    "token_file": "/run/secrets/github_token"
+  },
+  "capabilities": {
+    "domains": ["api.github.com"],
+    "git_repos": ["git@github.com:*"],
+    "max_memory_mb": 256
+  }
+}
 CONF
 
-RUN cat > /root/.omnifs/providers/dns.toml <<'CONF'
-plugin = "omnifs_provider_dns.wasm"
-mount = "dns"
-
-[capabilities]
-domains = ["cloudflare-dns.com", "dns.google"]
-max_memory_mb = 32
+RUN cat > /root/.omnifs/providers/dns.json <<'CONF'
+{
+  "plugin": "omnifs_provider_dns.wasm",
+  "mount": "dns",
+  "capabilities": {
+    "domains": ["cloudflare-dns.com", "dns.google"],
+    "max_memory_mb": 32
+  }
+}
 CONF
 
 SHELL ["/bin/zsh", "-c"]

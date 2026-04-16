@@ -10,7 +10,8 @@ omnifs-sdk-macros = { path = "../omnifs-sdk-macros" }
 wit-bindgen = "0.41"
 hashbrown = "0.15"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+serde_json = { workspace = true }
+schemars = { workspace = true }
 
 [lints.rust]
 unsafe_code = "deny"

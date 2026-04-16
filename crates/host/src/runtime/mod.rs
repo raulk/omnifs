@@ -14,7 +14,7 @@ use crate::auth::AuthManager;
 use crate::cache::l2::BrowseCacheL2;
 use crate::cache::{CacheRecord, RecordKind};
 use crate::config::InstanceConfig;
-use crate::config::schema::{self, SchemaField};
+use crate::config::schema;
 use crate::omnifs::provider::types as wit_types;
 use crate::omnifs::provider::types::DirListing;
 use crate::runtime::capability::{CapabilityChecker, CapabilityGrants};
@@ -34,6 +34,7 @@ use std::sync::Arc;
 pub struct EffectRuntime {
     store: Mutex<wasmtime::Store<HostState>>,
     bindings: Provider,
+    config_bytes: Vec<u8>,
     correlations: CorrelationTracker,
     http: HttpExecutor,
     kv: MemoryKvExecutor,
@@ -123,7 +124,8 @@ impl EffectRuntime {
         let wit_schema = bindings
             .omnifs_provider_lifecycle()
             .call_get_config_schema(&mut store)?;
-        validate_instance_config(&wit_schema, config);
+        validate_instance_config(wit_schema.as_deref(), config);
+        let config_bytes = config.config_bytes();
         let auth = if config.auth.is_empty() {
             Arc::new(AuthManager::none())
         } else {
@@ -152,6 +154,7 @@ impl EffectRuntime {
         Ok(Self {
             store: Mutex::new(store),
             bindings,
+            config_bytes,
             correlations: CorrelationTracker::new(),
             http: HttpExecutor::new(auth, capability),
             kv: MemoryKvExecutor::new(),
@@ -161,12 +164,12 @@ impl EffectRuntime {
         })
     }
 
-    pub fn initialize(&self, config_bytes: &[u8]) -> Result<wit_types::ActionResult, RuntimeError> {
+    pub fn initialize(&self) -> Result<wit_types::ActionResult, RuntimeError> {
         let response = {
             let mut store = self.store.lock();
             self.bindings
                 .omnifs_provider_lifecycle()
-                .call_initialize(&mut *store, config_bytes)?
+                .call_initialize(&mut *store, &self.config_bytes)?
         };
         Self::resolve_response_sync(response)
     }
@@ -179,7 +182,7 @@ impl EffectRuntime {
         Ok(())
     }
 
-    pub fn config_schema(&self) -> Result<wit_types::ConfigSchema, RuntimeError> {
+    pub fn config_schema(&self) -> Result<Option<String>, RuntimeError> {
         let mut store = self.store.lock();
         Ok(self
             .bindings
@@ -645,25 +648,17 @@ fn build_grants(config: &InstanceConfig, needs_git: bool) -> CapabilityGrants {
     }
 }
 
-fn validate_instance_config(wit_schema: &wit_types::ConfigSchema, config: &InstanceConfig) {
-    let schema_fields: Vec<SchemaField> = wit_schema
-        .fields
-        .iter()
-        .map(|f| SchemaField {
-            name: f.name.clone(),
-            field_type: f.field_type.clone(),
-            required: f.required,
-            default_value: f.default_value.clone(),
-            description: f.description.clone(),
-        })
-        .collect();
+fn validate_instance_config(schema_json: Option<&str>, config: &InstanceConfig) {
+    let Some(schema_json) = schema_json else {
+        return;
+    };
 
     let config_value = config
         .config_raw
         .clone()
-        .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+        .unwrap_or_else(|| serde_json::json!({}));
 
-    if let Err(e) = schema::validate_config(&schema_fields, &config_value) {
+    if let Err(e) = schema::validate_config(schema_json, &config_value) {
         tracing::warn!("config validation: {e}");
     }
 }

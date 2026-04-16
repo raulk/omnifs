@@ -10,7 +10,6 @@ struct RuntimeHarness {
     _engine: wasmtime::Engine,
     _clone_dir: TempDir,
     _cache_dir: TempDir,
-    config: InstanceConfig,
     runtime: EffectRuntime,
 }
 
@@ -39,8 +38,8 @@ fn make_engine() -> wasmtime::Engine {
     wasmtime::Engine::new(&wasm_config).unwrap()
 }
 
-fn make_runtime(config_toml: &str) -> RuntimeHarness {
-    let config = InstanceConfig::parse(config_toml).unwrap();
+fn make_runtime(config_json: &str) -> RuntimeHarness {
+    let config = InstanceConfig::parse(config_json).unwrap();
     let engine = make_engine();
     let clone_dir = tempfile::tempdir().unwrap();
     let cache_dir = tempfile::tempdir().unwrap();
@@ -59,7 +58,6 @@ fn make_runtime(config_toml: &str) -> RuntimeHarness {
         _engine: engine,
         _clone_dir: clone_dir,
         _cache_dir: cache_dir,
-        config,
         runtime,
     }
 }
@@ -68,49 +66,49 @@ fn make_runtime(config_toml: &str) -> RuntimeHarness {
 fn dns_provider_exposes_declared_config_schema() {
     let harness = make_runtime(
         r#"
-        plugin = "omnifs_provider_dns.wasm"
-        mount = "dns"
-
-        [capabilities]
-        domains = ["cloudflare-dns.com", "dns.google"]
-
-        [config]
-        default_resolver = "cloudflare"
-
-        [config.resolvers]
-        cloudflare = { url = "https://cloudflare-dns.com/dns-query", aliases = ["1.1.1.1"] }
+        {
+            "plugin": "omnifs_provider_dns.wasm",
+            "mount": "dns",
+            "capabilities": {
+                "domains": ["cloudflare-dns.com", "dns.google"]
+            },
+            "config": {
+                "default_resolver": "cloudflare",
+                "resolvers": {
+                    "cloudflare": {
+                        "url": "https://cloudflare-dns.com/dns-query",
+                        "aliases": ["1.1.1.1"]
+                    }
+                }
+            }
+        }
     "#,
     );
 
-    let schema = harness.runtime.config_schema().unwrap();
-    let field_names: Vec<_> = schema
-        .fields
-        .iter()
-        .map(|field| field.name.as_str())
-        .collect();
+    let schema = harness.runtime.config_schema().unwrap().unwrap();
+    let schema_json: serde_json::Value = serde_json::from_str(&schema).unwrap();
 
-    assert_eq!(field_names, vec!["default_resolver", "resolvers"]);
     assert_eq!(
-        schema.fields[0].default_value.as_deref(),
-        Some("cloudflare")
+        schema_json["properties"]["default_resolver"]["default"],
+        serde_json::Value::String("cloudflare".to_string())
     );
+    assert!(schema_json["properties"]["resolvers"].is_object());
 }
 
 #[tokio::test]
 async fn dns_provider_routes_static_and_dynamic_paths() {
     let harness = make_runtime(
         r#"
-        plugin = "omnifs_provider_dns.wasm"
-        mount = "dns"
-
-        [capabilities]
-        domains = ["cloudflare-dns.com", "dns.google"]
+        {
+            "plugin": "omnifs_provider_dns.wasm",
+            "mount": "dns",
+            "capabilities": {
+                "domains": ["cloudflare-dns.com", "dns.google"]
+            }
+        }
     "#,
     );
-    harness
-        .runtime
-        .initialize(&harness.config.config_bytes())
-        .unwrap();
+    harness.runtime.initialize().unwrap();
 
     let lookup = harness
         .runtime
@@ -149,17 +147,16 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 async fn github_provider_routes_namespace_and_numeric_paths() {
     let harness = make_runtime(
         r#"
-        plugin = "omnifs_provider_github.wasm"
-        mount = "github"
-
-        [capabilities]
-        domains = ["api.github.com"]
+        {
+            "plugin": "omnifs_provider_github.wasm",
+            "mount": "github",
+            "capabilities": {
+                "domains": ["api.github.com"]
+            }
+        }
     "#,
     );
-    harness
-        .runtime
-        .initialize(&harness.config.config_bytes())
-        .unwrap();
+    harness.runtime.initialize().unwrap();
 
     let repo_listing = harness
         .runtime

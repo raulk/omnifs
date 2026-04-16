@@ -1,8 +1,6 @@
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use hashbrown::HashMap;
-
 use crate::types::RecordType;
 use omnifs_sdk::prelude::*;
 
@@ -41,12 +39,17 @@ impl PartialEq<&str> for Endpoint {
 
 /// Resolver aliases and their `DoH` endpoints, parsed from provider config.
 ///
-/// Example TOML (as received by the provider, [config] prefix stripped by host):
-/// ```toml
-/// default_resolver = "cloudflare"
-///
-/// [resolvers]
-/// cloudflare = { url = "https://cloudflare-dns.com/dns-query", aliases = ["1.1.1.1", "1.0.0.1"] }
+/// Example JSON (as received by the provider, `config` object only):
+/// ```json
+/// {
+///   "default_resolver": "cloudflare",
+///   "resolvers": {
+///     "cloudflare": {
+///       "url": "https://cloudflare-dns.com/dns-query",
+///       "aliases": ["1.1.1.1", "1.0.0.1"]
+///     }
+///   }
+/// }
 /// ```
 #[derive(Debug, Clone)]
 pub(crate) struct ResolverConfig {
@@ -63,10 +66,10 @@ pub(crate) struct ResolverEntry {
 
 impl ResolverConfig {
     /// Build from already-deserialized config maps (called from `init`).
-    pub fn from_config(
-        default_resolver: String,
-        raw_resolvers: HashMap<String, crate::ConfigResolver>,
-    ) -> Self {
+    pub fn from_config<I>(default_resolver: String, raw_resolvers: I) -> Self
+    where
+        I: IntoIterator<Item = (String, crate::ConfigResolver)>,
+    {
         let resolvers: Vec<_> = raw_resolvers
             .into_iter()
             .filter_map(|(name, r)| {
@@ -88,22 +91,22 @@ impl ResolverConfig {
         }
     }
 
-    /// Build from raw TOML bytes (used by tests only).
+    /// Build from raw JSON bytes (used by tests only).
     #[cfg(test)]
-    pub fn from_toml(config_bytes: &[u8]) -> Self {
+    pub fn from_json(config_bytes: &[u8]) -> Self {
         #[derive(serde::Deserialize)]
         #[serde(default)]
         struct RawConfig {
             default_resolver: String,
             #[serde(default)]
-            resolvers: HashMap<String, RawResolver>,
+            resolvers: std::collections::BTreeMap<String, RawResolver>,
         }
 
         impl Default for RawConfig {
             fn default() -> Self {
                 Self {
                     default_resolver: "cloudflare".to_string(),
-                    resolvers: HashMap::new(),
+                    resolvers: std::collections::BTreeMap::new(),
                 }
             }
         }
@@ -115,8 +118,7 @@ impl ResolverConfig {
             aliases: Vec<String>,
         }
 
-        let toml_str = std::str::from_utf8(config_bytes).unwrap_or("");
-        let raw: RawConfig = omnifs_sdk::toml::from_str(toml_str).unwrap_or_default();
+        let raw: RawConfig = omnifs_sdk::serde_json::from_slice(config_bytes).unwrap_or_default();
 
         let resolvers: Vec<_> = raw
             .resolvers
@@ -325,7 +327,7 @@ mod tests {
     use super::*;
 
     fn default_config() -> ResolverConfig {
-        ResolverConfig::from_toml(b"")
+        ResolverConfig::from_json(b"{}")
     }
 
     #[test]
@@ -346,13 +348,16 @@ mod tests {
 
     #[test]
     fn custom_resolver_from_config() {
-        let toml = br#"
-            default_resolver = "quad9"
-
-            [resolvers]
-            quad9 = { url = "https://dns.quad9.net:5053/dns-query", aliases = ["9.9.9.9"] }
-        "#;
-        let cfg = ResolverConfig::from_toml(toml);
+        let json = br#"{
+            "default_resolver": "quad9",
+            "resolvers": {
+                "quad9": {
+                    "url": "https://dns.quad9.net:5053/dns-query",
+                    "aliases": ["9.9.9.9"]
+                }
+            }
+        }"#;
+        let cfg = ResolverConfig::from_json(json);
         assert_eq!(
             cfg.resolve_endpoint(None),
             "https://dns.quad9.net:5053/dns-query"

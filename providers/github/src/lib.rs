@@ -19,7 +19,7 @@ enum OwnerKind {
     Org,
 }
 
-#[derive(Deserialize)]
+#[omnifs_sdk::config]
 pub struct Config {}
 
 pub struct State {

@@ -55,7 +55,7 @@ impl ProviderRegistry {
         for entry in std::fs::read_dir(&providers_dir).map_err(RegistryError::ScanFailed)? {
             let entry = entry.map_err(RegistryError::ScanFailed)?;
             let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "toml") {
+            if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
 

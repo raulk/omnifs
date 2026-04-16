@@ -3,8 +3,9 @@
 //! Provides WIT bindings, helper types, and proc macros for building
 //! omnifs providers. Providers depend only on this crate.
 //!
-//! Usage: `#[omnifs_sdk::provider]` on an impl block, `#[route("...")]`
-//! on path handler methods within the block.
+//! Usage: `#[omnifs_sdk::config]` on config types, `#[omnifs_sdk::provider]`
+//! on an impl block, and `#[route("...")]` on path handler methods within
+//! the block.
 
 // Generate WIT bindings once; providers import from here.
 wit_bindgen::generate!({
@@ -17,15 +18,20 @@ pub mod cache;
 pub mod helpers;
 pub mod http;
 pub mod prelude;
+pub mod schema;
 
 // Re-export proc macros at the crate root so #[omnifs_sdk::provider] works.
+pub use omnifs_sdk_macros::Config;
+pub use omnifs_sdk_macros::config;
 pub use omnifs_sdk_macros::provider;
 pub use omnifs_sdk_macros::route;
 
 // Re-export deps that generated code references, so providers don't need
 // direct dependencies on them.
 pub use hashbrown;
-pub use toml;
+pub use schemars;
+pub use serde;
+pub use serde_json;
 
 /// Internal types used by generated code. Not part of the public API.
 pub mod __internal {

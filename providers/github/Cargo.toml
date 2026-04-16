@@ -15,7 +15,6 @@ omnifs-sdk = { path = "../../crates/omnifs-sdk" }
 hashbrown = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
 rc-zip-sync = { version = "4", default-features = false, features = ["deflate"] }
 
 [package.metadata.component]

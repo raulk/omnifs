@@ -13,8 +13,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, LitStr, Pat, ReturnType, Type,
-    parse_macro_input,
+    Attribute, FnArg, Ident, ImplItem, ImplItemFn, Item, ItemEnum, ItemImpl, ItemStruct, LitStr,
+    Pat, ReturnType, Type, parse_macro_input,
 };
 
 // ---------------------------------------------------------------------------
@@ -454,19 +454,13 @@ fn generate_lifecycle_impl(
     let config_schema_body = if has_config_schema {
         quote! { #type_name::get_config_schema() }
     } else {
-        quote! { omnifs_sdk::prelude::ConfigSchema { fields: vec![] } }
+        quote! { omnifs_sdk::schema::json_schema_for::<#config_type>() }
     };
 
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::lifecycle::Guest for #type_name {
             fn initialize(config_bytes: Vec<u8>) -> omnifs_sdk::prelude::ProviderResponse {
-                let config_str = match core::str::from_utf8(&config_bytes) {
-                    Ok(s) => s,
-                    Err(e) => return omnifs_sdk::prelude::ProviderResponse::Done(
-                        omnifs_sdk::prelude::ActionResult::Err(format!("invalid UTF-8: {e}"))
-                    ),
-                };
-                let config: #config_type = match omnifs_sdk::toml::from_str(config_str) {
+                let config: #config_type = match omnifs_sdk::serde_json::from_slice(&config_bytes) {
                     Ok(c) => c,
                     Err(e) => return omnifs_sdk::prelude::ProviderResponse::Done(
                         omnifs_sdk::prelude::ActionResult::Err(format!("config error: {e}"))
@@ -492,7 +486,7 @@ fn generate_lifecycle_impl(
                 STATE.with(|s| *s.borrow_mut() = None);
             }
 
-            fn get_config_schema() -> omnifs_sdk::prelude::ConfigSchema {
+            fn get_config_schema() -> Option<String> {
                 #config_schema_body
             }
         }
@@ -790,6 +784,68 @@ fn provider_impl(input: ItemImpl) -> Result<TokenStream2, syn::Error> {
         #reconcile_impl
         #export_call
     })
+}
+
+fn config_item_impl(item: Item) -> Result<TokenStream2, syn::Error> {
+    match item {
+        Item::Struct(mut item_struct) => {
+            add_config_attrs_to_struct(&mut item_struct);
+            Ok(quote! { #item_struct })
+        }
+        Item::Enum(mut item_enum) => {
+            add_config_attrs_to_enum(&mut item_enum);
+            Ok(quote! { #item_enum })
+        }
+        other => Err(syn::Error::new(
+            other.span(),
+            "#[omnifs_sdk::config] can only be used on structs or enums",
+        )),
+    }
+}
+
+fn add_config_attrs_to_struct(item: &mut ItemStruct) {
+    item.attrs.push(syn::parse_quote! {
+        #[derive(omnifs_sdk::serde::Deserialize, omnifs_sdk::schemars::JsonSchema)]
+    });
+    item.attrs.push(syn::parse_quote! {
+        #[serde(crate = "omnifs_sdk::serde")]
+    });
+    item.attrs.push(syn::parse_quote! {
+        #[serde(deny_unknown_fields)]
+    });
+    item.attrs.push(syn::parse_quote! {
+        #[schemars(crate = "omnifs_sdk::schemars")]
+    });
+}
+
+fn add_config_attrs_to_enum(item: &mut ItemEnum) {
+    item.attrs.push(syn::parse_quote! {
+        #[derive(omnifs_sdk::serde::Deserialize, omnifs_sdk::schemars::JsonSchema)]
+    });
+    item.attrs.push(syn::parse_quote! {
+        #[serde(crate = "omnifs_sdk::serde")]
+    });
+    item.attrs.push(syn::parse_quote! {
+        #[serde(deny_unknown_fields)]
+    });
+    item.attrs.push(syn::parse_quote! {
+        #[schemars(crate = "omnifs_sdk::schemars")]
+    });
+}
+
+#[proc_macro_attribute]
+pub fn config(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as Item);
+    match config_item_impl(input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+#[allow(non_snake_case)]
+#[proc_macro_attribute]
+pub fn Config(attr: TokenStream, item: TokenStream) -> TokenStream {
+    config(attr, item)
 }
 
 /// Marker attribute for route handler methods inside `#[provider]` impl blocks.

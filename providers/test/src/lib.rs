@@ -1,6 +1,6 @@
 use omnifs_sdk::prelude::*;
 
-#[derive(Deserialize)]
+#[omnifs_sdk::config]
 struct Config {}
 
 struct State;

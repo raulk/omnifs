@@ -22,24 +22,19 @@ pub(crate) struct DnsRecord {
     pub value: String,
 }
 
-#[derive(Deserialize)]
-#[serde(default)]
+#[omnifs_sdk::config]
 struct Config {
+    #[serde(default = "default_resolver_name")]
     default_resolver: String,
     #[serde(default)]
-    resolvers: HashMap<String, ConfigResolver>,
+    resolvers: std::collections::BTreeMap<String, ConfigResolver>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            default_resolver: "cloudflare".to_string(),
-            resolvers: HashMap::new(),
-        }
-    }
+fn default_resolver_name() -> String {
+    "cloudflare".to_string()
 }
 
-#[derive(Deserialize)]
+#[omnifs_sdk::config]
 struct ConfigResolver {
     url: String,
     #[serde(default)]
@@ -59,27 +54,6 @@ impl DnsProvider {
                 description: "DNS record browsing via DNS-over-HTTPS".to_string(),
             },
         )
-    }
-
-    fn get_config_schema() -> ConfigSchema {
-        ConfigSchema {
-            fields: vec![
-                ConfigField {
-                    name: "default_resolver".to_string(),
-                    field_type: "string".to_string(),
-                    required: false,
-                    default_value: Some("cloudflare".to_string()),
-                    description: "Default resolver alias used when no @resolver prefix".to_string(),
-                },
-                ConfigField {
-                    name: "resolvers".to_string(),
-                    field_type: "table".to_string(),
-                    required: false,
-                    default_value: None,
-                    description: "Named resolver aliases mapping to DoH endpoint URLs".to_string(),
-                },
-            ],
-        }
     }
 
     fn capabilities() -> RequestedCapabilities {

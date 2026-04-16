@@ -13,8 +13,8 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonschema = { workspace = true }
 postcard = { workspace = true }
-toml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
