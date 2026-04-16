@@ -5,6 +5,7 @@
 
 <h1 align="center"><b>omnifs</b></h1>
 <h4 align="center">the universe, mounted on your filesystem.</h4>
+<p align="center"><a href="#quickstart">Quickstart</a> | <a href="#explore">Examples</a> | <a href="#providers">Providers</a></p>
 </div>
 
 omnifs mirrors the entire world into your local filesystem. GitHub repos, Hugging Face models, Kubernetes clusters, Slack channels, arXiv papers, and more as paths you can `cd`, `ls`, `cat`, and `grep`.
@@ -68,6 +69,9 @@ docker compose exec omnifs /bin/zsh
 ### Explore
 
 ```bash
+##
+## GITHUB
+##
 # List repos in user/org
 cd /github/torvalds
 ls
@@ -84,8 +88,12 @@ ls
 cd /github/ollama/ollama/_issues/_open
 ls
 
+##
+## DNS
+##
+
 # query DNS records
-cd /dns/example.com
+cd /dns/cloudflare.com
 cat A
 
 # poke around!
@@ -132,14 +140,46 @@ omnifs runs as a FUSE filesystem on Linux (macOS and Windows planned). The archi
 
 **Git-backed reconciliation (WIP)** means writes work through Git. Edit files in a transaction directory, then rename it to `commit/` to execute. The provider translates that into API calls. Everything stays auditable, revertible, and familiar.
 
-## Status
+## Providers
 
-Early release (v0.1.0). Read-only GitHub projection works end-to-end in a Linux container. Write-back and additional providers are next.
+| Provider   | Mount     | Description                                            |
+| ---------- | --------- | ------------------------------------------------------ |
+| **GitHub** | `/github` | Browse repos, issues, PRs, CI runs, and diffs as files |
+| **DNS**    | `/dns`    | Query DNS records via DNS-over-HTTPS                   |
 
-- Browse any GitHub repo's tree without cloning it locally
-- Read issues, PRs, CI runs, and diffs as plain files
-- Extend with new providers by dropping a `.wasm` plugin into `~/.omnifs/plugins/`
-- Responses cached with LRU eviction; no redundant API calls
+### GitHub (`/github`)
+
+| Path                                                       | Content                                         |
+| ---------------------------------------------------------- | ----------------------------------------------- |
+| `/github/{owner}`                                          | List repos for a user or org                    |
+| `/github/{owner}/{repo}/_repo/`                            | Browse the repo tree (cloned on demand via SSH) |
+| `/github/{owner}/{repo}/_issues/_open/`                    | List open issues                                |
+| `/github/{owner}/{repo}/_issues/_all/`                     | List all issues                                 |
+| `/github/{owner}/{repo}/_issues/{filter}/{n}/title`        | Issue title                                     |
+| `/github/{owner}/{repo}/_issues/{filter}/{n}/body`         | Issue body (markdown)                           |
+| `/github/{owner}/{repo}/_issues/{filter}/{n}/state`        | Issue state                                     |
+| `/github/{owner}/{repo}/_issues/{filter}/{n}/comments/{i}` | Individual comment                              |
+| `/github/{owner}/{repo}/_prs/{filter}/{n}/diff`            | PR diff                                         |
+| `/github/{owner}/{repo}/_actions/runs/{id}/status`         | CI run status                                   |
+| `/github/{owner}/{repo}/_actions/runs/{id}/log`            | CI run log                                      |
+
+### DNS (`/dns`)
+
+| Path                                 | Content                                                     |
+| ------------------------------------ | ----------------------------------------------------------- |
+| `/dns/{domain}/A`                    | A records                                                   |
+| `/dns/{domain}/AAAA`                 | AAAA records                                                |
+| `/dns/{domain}/MX`                   | MX records                                                  |
+| `/dns/{domain}/NS`                   | NS records                                                  |
+| `/dns/{domain}/TXT`                  | TXT records                                                 |
+| `/dns/{domain}/CNAME`                | CNAME records                                               |
+| `/dns/{domain}/SOA`                  | SOA record                                                  |
+| `/dns/{domain}/_all`                 | All common record types                                     |
+| `/dns/{domain}/_raw`                 | dig-style output                                            |
+| `/dns/@{resolver}/{domain}/{record}` | Query via a specific resolver (e.g., `@google`, `@1.1.1.1`) |
+| `/dns/{ip}`                          | Reverse DNS lookup (PTR)                                    |
+| `/dns/_reverse/{ip}`                 | Reverse DNS lookup (alternate path)                         |
+| `/dns/_resolvers`                    | List configured resolvers                                   |
 
 ## What's coming
 
