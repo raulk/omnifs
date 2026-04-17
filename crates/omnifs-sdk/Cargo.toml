@@ -1,0 +1,26 @@
+[package]
+name = "omnifs-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "SDK for building omnifs providers"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+omnifs-sdk-macros = { path = "../omnifs-sdk-macros" }
+wit-bindgen = "0.41"
+lru = "0.16"
+hashbrown = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

@@ -3,12 +3,13 @@
 //! Handles fetching and serving specific resource files (title, body,
 //! comments, diffs) with stale-on-error caching.
 
-use super::{dispatch, enter_cache_only, err, is_unauthorized, with_state};
+use super::{dispatch_or_err, enter_cache_only, err, get_cached, is_unauthorized};
 use crate::Continuation;
 use crate::api;
-use crate::omnifs::provider::types::DirListing;
-use crate::omnifs::provider::types::*;
-use crate::path::{FsPath, ResourceFile, ResourceKind, RunFile};
+use crate::path::FsPath;
+use crate::types::{RepoId, ResourceFile, ResourceKind, RunFile, github_owner_cache_prefix};
+use crate::with_state;
+use omnifs_sdk::prelude::*;
 
 pub fn resume_resource(path: &str, result: &SingleEffectResult) -> ProviderResponse {
     match FsPath::parse(path) {
@@ -21,16 +22,15 @@ pub fn resume_resource(path: &str, result: &SingleEffectResult) -> ProviderRespo
             ..
         }) => {
             let api_resource = kind.api_path();
-            let cache_key = format!("{owner}/{repo}/{api_resource}/{number}");
+            let cache_key =
+                RepoId::new(owner, repo).cache_path(&format!("{api_resource}/{number}"));
 
             // Stale-on-error: serve cached data when the API request fails.
             let Ok(body) = super::extract_http_body(result) else {
-                if let Ok(Some(data)) =
-                    with_state(|state| state.cache.get(&cache_key).map(<[u8]>::to_vec))
-                {
+                if let Ok(Some(data)) = get_cached(&cache_key) {
                     return serve_resource_file(&data, file);
                 }
-                return err("API error and no cached data");
+                return err(ProviderError::not_found("API error and no cached data"));
             };
 
             let _ = with_state(|state| state.cache.set(cache_key, body.to_vec()));
@@ -42,29 +42,28 @@ pub fn resume_resource(path: &str, result: &SingleEffectResult) -> ProviderRespo
             run_id,
             file,
         }) => {
-            let cache_key = format!("{owner}/{repo}/actions/runs/{run_id}");
+            let cache_key =
+                RepoId::new(owner, repo).cache_path(&format!("actions/runs/{run_id}"));
 
             // Stale-on-error: serve cached data when the API request fails.
             let Ok(body) = super::extract_http_body(result) else {
-                if let Ok(Some(data)) =
-                    with_state(|state| state.cache.get(&cache_key).map(<[u8]>::to_vec))
-                {
+                if let Ok(Some(data)) = get_cached(&cache_key) {
                     return serve_run_file(&data, file);
                 }
-                return err("API error and no cached data");
+                return err(ProviderError::not_found("API error and no cached data"));
             };
 
             let _ = with_state(|state| state.cache.set(cache_key, body.to_vec()));
             serve_run_file(body, file)
         }
-        _ => err("invalid resource path"),
+        _ => err(ProviderError::internal("invalid resource path")),
     }
 }
 
 pub fn serve_resource_file(body: &[u8], file: ResourceFile) -> ProviderResponse {
     let json = match api::parse_json(body) {
         Ok(j) => j,
-        Err(e) => return err(&e),
+        Err(e) => return err(e),
     };
     let content = match file {
         ResourceFile::Title => extract_str(&json, "title"),
@@ -78,7 +77,9 @@ pub fn serve_resource_file(body: &[u8], file: ResourceFile) -> ProviderResponse 
                 .to_string()
                 + "\n"
         }
-        ResourceFile::Diff => return err("diff should be handled separately"),
+        ResourceFile::Diff => {
+            return err(ProviderError::internal("diff should be handled separately"));
+        }
     };
     ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
 }
@@ -86,7 +87,7 @@ pub fn serve_resource_file(body: &[u8], file: ResourceFile) -> ProviderResponse 
 pub fn serve_run_file(body: &[u8], file: RunFile) -> ProviderResponse {
     let json = match api::parse_json(body) {
         Ok(j) => j,
-        Err(e) => return err(&e),
+        Err(e) => return err(e),
     };
     let content = match file {
         RunFile::Status => extract_str(&json, "status"),
@@ -97,7 +98,7 @@ pub fn serve_run_file(body: &[u8], file: RunFile) -> ProviderResponse {
                 .to_string()
                 + "\n"
         }
-        RunFile::Log => return err("log should be handled separately"),
+        RunFile::Log => return err(ProviderError::internal("log should be handled separately")),
     };
     ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
 }
@@ -111,22 +112,23 @@ pub fn resume_validating_repo(
     if is_unauthorized(result) {
         enter_cache_only();
         if let Some(FsPath::Repo { owner, .. }) = &fs_path {
-            return dispatch(
+            return dispatch_or_err(
                 id,
                 Continuation::ListingCachedRepos {
                     path: path.to_string(),
                     mode: super::CachedRepoListMode::ValidateRepo,
                 },
                 SingleEffect::GitListCachedRepos(GitCacheListRequest {
-                    prefix: Some(format!("github.com/{}/", *owner)),
+                    prefix: Some(github_owner_cache_prefix(owner)),
                 }),
             );
         }
     }
+
     let status = match result {
         SingleEffectResult::HttpResponse(resp) => resp.status,
-        SingleEffectResult::EffectError(_) => 500,
-        _ => return err("unexpected result"),
+        SingleEffectResult::EffectError(e) => return err(ProviderError::from_effect_error(e)),
+        _ => return err(ProviderError::internal("unexpected result")),
     };
 
     let name = fs_path.as_ref().and_then(FsPath::repo).unwrap_or("");
@@ -134,9 +136,9 @@ pub fn resume_validating_repo(
     if status == 404 {
         ProviderResponse::Done(ActionResult::DirEntryOption(None))
     } else if status >= 400 {
-        err(&format!("repo validation failed: HTTP {status}"))
+        err(ProviderError::from_http_status(status))
     } else {
-        super::dir_entry(name)
+        dir_entry(name)
     }
 }
 
@@ -161,10 +163,13 @@ pub fn resume_validating_resource(
     if is_unauthorized(result) {
         enter_cache_only();
         if let Some((owner, repo, kind, number)) = resource_info {
-            let cache_key = format!("{owner}/{repo}/{}/{number}", kind.api_path());
-            let cached = with_state(|state| state.cache.get(&cache_key).is_some()).unwrap_or(false);
+            let cache_key =
+                RepoId::new(owner, repo).cache_path(&format!("{}/{number}", kind.api_path()));
+            let cached = get_cached(&cache_key)
+                .map(|entry| entry.is_some())
+                .unwrap_or(false);
             if cached {
-                return super::dir_entry(name);
+                return dir_entry(name);
             }
         }
         return ProviderResponse::Done(ActionResult::DirEntryOption(None));
@@ -175,19 +180,20 @@ pub fn resume_validating_resource(
             ProviderResponse::Done(ActionResult::DirEntryOption(None))
         }
         SingleEffectResult::HttpResponse(resp) if resp.status >= 400 => {
-            err(&format!("resource validation failed: HTTP {}", resp.status))
+            err(ProviderError::from_http_status(resp.status))
         }
         SingleEffectResult::HttpResponse(resp) => {
             if let Some((owner, repo, kind, number)) = resource_info {
-                let cache_key = format!("{owner}/{repo}/{}/{number}", kind.api_path());
+                let repo_path = RepoId::new(owner, repo);
+                let cache_key = repo_path.cache_path(&format!("{}/{number}", kind.api_path()));
                 let _ = with_state(|state| state.cache.set(cache_key, resp.body.clone()));
             }
-            super::dir_entry(name)
+            dir_entry(name)
         }
         SingleEffectResult::EffectError(_) => {
             ProviderResponse::Done(ActionResult::DirEntryOption(None))
         }
-        _ => err("unexpected result"),
+        _ => err(ProviderError::internal("unexpected result")),
     }
 }
 
@@ -222,10 +228,9 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
     if is_unauthorized(result) {
         enter_cache_only();
         if let Some((owner, repo, number)) = comment_info {
-            let cache_key = format!("{owner}/{repo}/issues/{number}/comments");
-            if let Ok(Some(data)) =
-                with_state(|state| state.cache.get(&cache_key).map(<[u8]>::to_vec))
-            {
+            let cache_key =
+                RepoId::new(owner, repo).cache_path(&format!("issues/{number}/comments"));
+            if let Ok(Some(data)) = get_cached(&cache_key) {
                 return match &fs_path {
                     Some(FsPath::Comments { .. }) => list_cached_comments(&data),
                     Some(FsPath::CommentFile { idx, .. }) => serve_comment_file(&data, idx),
@@ -237,7 +242,7 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
             }
         }
         if matches!(&fs_path, Some(FsPath::CommentFile { .. })) {
-            return err("comment not found in cache");
+            return err(ProviderError::not_found("comment not found in cache"));
         }
         return ProviderResponse::Done(ActionResult::DirEntries(DirListing {
             entries: vec![],
@@ -250,53 +255,48 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
     };
 
     let Some((owner, repo, number)) = comment_info else {
-        return err("unexpected comments path");
+        return err(ProviderError::internal("unexpected comments path"));
     };
 
-    let cache_key = format!("{owner}/{repo}/issues/{number}/comments");
+    let cache_key = RepoId::new(owner, repo).cache_path(&format!("issues/{number}/comments"));
     let _ = with_state(|state| state.cache.set(cache_key, body.to_vec()));
 
     let json = match api::parse_json(body) {
         Ok(j) => j,
-        Err(e) => return err(&e),
+        Err(e) => return err(e),
     };
 
     match &fs_path {
         Some(FsPath::Comments { .. }) => {
             let Some(arr) = json.as_array() else {
-                return err("expected array in comments response");
+                return err(ProviderError::internal(
+                    "expected array in comments response",
+                ));
             };
-            let entries: Vec<DirEntry> = (1..=arr.len())
-                .map(|i| DirEntry {
-                    name: i.to_string(),
-                    kind: EntryKind::File,
-                    size: Some(4096),
-                    projected_files: None,
-                })
-                .collect();
+            let entries: Vec<DirEntry> = (1..=arr.len()).map(|i| mk_file(i.to_string())).collect();
             ProviderResponse::Done(ActionResult::DirEntries(DirListing {
                 entries,
                 exhaustive: true,
             }))
         }
         Some(FsPath::CommentFile { idx, .. }) => serve_comment_file(body, idx),
-        _ => err("unexpected comments path"),
+        _ => err(ProviderError::internal("unexpected comments path")),
     }
 }
 
 pub fn serve_comment_file(body: &[u8], index_str: &str) -> ProviderResponse {
     let idx: usize = match index_str.parse::<usize>() {
         Ok(i) if i >= 1 => i,
-        _ => return err("invalid comment index"),
+        _ => return err(ProviderError::invalid_input("invalid comment index")),
     };
 
     let json = match api::parse_json(body) {
         Ok(j) => j,
-        Err(e) => return err(&e),
+        Err(e) => return err(e),
     };
 
     let Some(arr) = json.as_array() else {
-        return err("expected array in comments data");
+        return err(ProviderError::internal("expected array in comments data"));
     };
 
     match arr.get(idx - 1) {
@@ -310,28 +310,21 @@ pub fn serve_comment_file(body: &[u8], index_str: &str) -> ProviderResponse {
             let content = format!("{user}:\n{body_text}\n");
             ProviderResponse::Done(ActionResult::FileContent(content.into_bytes()))
         }
-        None => err("comment index out of range"),
+        None => err(ProviderError::not_found("comment index out of range")),
     }
 }
 
 pub fn list_cached_comments(body: &[u8]) -> ProviderResponse {
     let json = match api::parse_json(body) {
         Ok(j) => j,
-        Err(e) => return err(&e),
+        Err(e) => return err(e),
     };
 
     let Some(arr) = json.as_array() else {
-        return err("expected array in comments data");
+        return err(ProviderError::internal("expected array in comments data"));
     };
 
-    let entries: Vec<DirEntry> = (1..=arr.len())
-        .map(|i| DirEntry {
-            name: i.to_string(),
-            kind: EntryKind::File,
-            size: Some(4096),
-            projected_files: None,
-        })
-        .collect();
+    let entries: Vec<DirEntry> = (1..=arr.len()).map(|i| mk_file(i.to_string())).collect();
     ProviderResponse::Done(ActionResult::DirEntries(DirListing {
         entries,
         exhaustive: true,

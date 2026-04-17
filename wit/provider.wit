@@ -81,6 +81,12 @@ interface types {
         batch(list<single-effect-result>),
     }
 
+    record provider-error {
+        kind: error-kind,
+        message: string,
+        retryable: bool,
+    }
+
     // --- Action results (terminal) ---
 
     variant action-result {
@@ -95,6 +101,7 @@ interface types {
         provider-initialized(provider-info),
         disowned-tree(tree-ref),
         ok,
+        provider-err(provider-error),
         err(string),
     }
 
@@ -302,18 +309,6 @@ interface types {
         description: string,
     }
 
-    record config-field {
-        name: string,
-        field-type: string,
-        required: bool,
-        default-value: option<string>,
-        description: string,
-    }
-
-    record config-schema {
-        fields: list<config-field>,
-    }
-
     record requested-capabilities {
         domains: list<string>,
         auth-types: list<string>,
@@ -335,11 +330,11 @@ interface types {
 // === Provider exports ===
 
 interface lifecycle {
-    use types.{provider-response, config-schema, requested-capabilities};
+    use types.{provider-response, requested-capabilities};
 
     initialize: func(config: list<u8>) -> provider-response;
     shutdown: func();
-    get-config-schema: func() -> config-schema;
+    get-config-schema: func() -> option<string>;
     capabilities: func() -> requested-capabilities;
 }
 

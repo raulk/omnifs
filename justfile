@@ -4,7 +4,7 @@ container := "omnifs"
 check: build-providers
     cargo fmt --all --check
     cargo clippy -- -D warnings
-    cargo test
+    cargo test -p omnifs-cli -p omnifs-host -p omnifs-sdk
     just check-providers
 
 check-providers:

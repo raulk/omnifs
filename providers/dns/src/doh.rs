@@ -1,14 +1,98 @@
-use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::collections::BTreeMap;
+use std::fmt::Write;
 
-use hashbrown::HashMap;
-use serde::Deserialize;
+use hickory_proto::op::{Message, ResponseCode};
+#[cfg(test)]
+use hickory_proto::rr::{Name, RData, Record, rdata::A};
 
-use crate::omnifs::provider::types::*;
-use crate::path::RecordType;
+use crate::types::RecordType;
+use omnifs_sdk::prelude::*;
 
 const CLOUDFLARE_DOH: &str = "https://cloudflare-dns.com/dns-query";
-const GOOGLE_DOH: &str = "https://dns.google/resolve";
+const GOOGLE_DOH: &str = "https://dns.google/dns-query";
+const BUILTIN_DEFAULTS_JSON: &str = r#"{
+  "default_resolver": "cloudflare",
+  "resolvers": {
+    "cloudflare": {
+      "url": "https://cloudflare-dns.com/dns-query",
+      "aliases": ["1.1.1.1", "1.0.0.1"]
+    },
+    "google": {
+      "url": "https://dns.google/dns-query",
+      "aliases": ["8.8.8.8", "8.8.4.4", "dns.google"]
+    }
+  }
+}"#;
+
+#[derive(serde::Deserialize)]
+#[serde(default)]
+struct RawConfig {
+    default_resolver: String,
+    #[serde(default)]
+    resolvers: BTreeMap<String, RawResolver>,
+}
+
+impl Default for RawConfig {
+    fn default() -> Self {
+        Self {
+            default_resolver: "cloudflare".to_string(),
+            resolvers: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RawResolver {
+    url: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+fn parse_raw_resolvers(bytes: &[u8]) -> RawConfig {
+    omnifs_sdk::serde_json::from_slice(bytes).unwrap_or_default()
+}
+
+fn build_resolver_entries(
+    raw_resolvers: BTreeMap<String, RawResolver>,
+) -> Vec<ResolverEntry> {
+    raw_resolvers
+        .into_iter()
+        .filter_map(|(name, raw)| {
+            Some(ResolverEntry {
+                name,
+                url: Endpoint::new(raw.url).ok()?,
+                aliases: raw.aliases,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+enum DohError {
+    Parse(String),
+    DnsResponse(ResponseCode),
+}
+
+impl DohError {
+    fn into_provider_error(self) -> ProviderError {
+        match self {
+            Self::Parse(message) => {
+                ProviderError::invalid_input(format!("invalid DoH DNS message: {message}"))
+            }
+            Self::DnsResponse(code) => {
+                let message = format!("DNS response code: {code}");
+                match code {
+                    ResponseCode::FormErr => ProviderError::invalid_input(message),
+                    ResponseCode::ServFail => ProviderError::network(message, true),
+                    ResponseCode::NXDomain => ProviderError::not_found(message),
+                    ResponseCode::Refused => ProviderError::denied(message),
+                    _ => ProviderError::internal(message),
+                }
+            }
+        }
+    }
+}
 
 /// Validated `DoH` endpoint URL (always HTTPS).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,12 +126,17 @@ impl PartialEq<&str> for Endpoint {
 
 /// Resolver aliases and their `DoH` endpoints, parsed from provider config.
 ///
-/// Example TOML (as received by the provider, [config] prefix stripped by host):
-/// ```toml
-/// default_resolver = "cloudflare"
-///
-/// [resolvers]
-/// cloudflare = { url = "https://cloudflare-dns.com/dns-query", aliases = ["1.1.1.1", "1.0.0.1"] }
+/// Example JSON (as received by the provider, `config` object only):
+/// ```json
+/// {
+///   "default_resolver": "cloudflare",
+///   "resolvers": {
+///     "cloudflare": {
+///       "url": "https://cloudflare-dns.com/dns-query",
+///       "aliases": ["1.1.1.1", "1.0.0.1"]
+///     }
+///   }
+/// }
 /// ```
 #[derive(Debug, Clone)]
 pub(crate) struct ResolverConfig {
@@ -62,37 +151,13 @@ pub(crate) struct ResolverEntry {
     pub aliases: Vec<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(default)]
-struct RawConfig {
-    default_resolver: String,
-    #[serde(default)]
-    resolvers: HashMap<String, RawResolver>,
-}
-
-impl Default for RawConfig {
-    fn default() -> Self {
-        Self {
-            default_resolver: "cloudflare".to_string(),
-            resolvers: HashMap::new(),
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct RawResolver {
-    url: String,
-    #[serde(default)]
-    aliases: Vec<String>,
-}
-
 impl ResolverConfig {
-    pub fn from_toml(config_bytes: &[u8]) -> Self {
-        let toml_str = std::str::from_utf8(config_bytes).unwrap_or("");
-        let raw: RawConfig = toml::from_str(toml_str).unwrap_or_default();
-
-        let resolvers: Vec<_> = raw
-            .resolvers
+    /// Build from already-deserialized config maps (called from `init`).
+    pub fn from_config<I>(default_resolver: String, raw_resolvers: I) -> Self
+    where
+        I: IntoIterator<Item = (String, crate::ConfigResolver)>,
+    {
+        let resolvers: Vec<_> = raw_resolvers
             .into_iter()
             .filter_map(|(name, r)| {
                 Some(ResolverEntry {
@@ -102,6 +167,22 @@ impl ResolverConfig {
                 })
             })
             .collect();
+
+        Self {
+            default_name: default_resolver,
+            resolvers: if resolvers.is_empty() {
+                Self::builtin_defaults()
+            } else {
+                resolvers
+            },
+        }
+    }
+
+    /// Build from raw JSON bytes (used by tests only).
+    #[cfg(test)]
+    pub fn from_json(config_bytes: &[u8]) -> Self {
+        let raw = parse_raw_resolvers(config_bytes);
+        let resolvers = build_resolver_entries(raw.resolvers);
 
         Self {
             default_name: raw.default_resolver,
@@ -114,22 +195,8 @@ impl ResolverConfig {
     }
 
     fn builtin_defaults() -> Vec<ResolverEntry> {
-        vec![
-            ResolverEntry {
-                name: "cloudflare".to_string(),
-                url: Endpoint::new(CLOUDFLARE_DOH).expect("hardcoded URL"),
-                aliases: vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()],
-            },
-            ResolverEntry {
-                name: "google".to_string(),
-                url: Endpoint::new(GOOGLE_DOH).expect("hardcoded URL"),
-                aliases: vec![
-                    "8.8.8.8".to_string(),
-                    "8.8.4.4".to_string(),
-                    "dns.google".to_string(),
-                ],
-            },
-        ]
+        let raw = parse_raw_resolvers(BUILTIN_DEFAULTS_JSON.as_bytes());
+        build_resolver_entries(raw.resolvers)
     }
 
     pub fn resolve_endpoint(&self, specifier: Option<&str>) -> Endpoint {
@@ -191,59 +258,33 @@ pub(crate) fn query(
         url,
         headers: vec![Header {
             name: "Accept".to_string(),
-            value: "application/dns-json".to_string(),
+            value: "application/dns-message".to_string(),
         }],
         body: None,
     })
 }
 
-/// `DoH` JSON response (RFC 8484 / Cloudflare/Google convention).
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DohResponse {
-    status: u64,
-    #[serde(default)]
-    answer: Vec<DohAnswer>,
+pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), ProviderError> {
+    parse_doh_response(body).map_err(DohError::into_provider_error)
 }
 
-#[derive(serde::Deserialize)]
-struct DohAnswer {
-    #[serde(rename = "type", default)]
-    rtype: u16,
-    #[serde(rename = "TTL", default = "default_ttl")]
-    ttl: u64,
-    #[serde(default)]
-    data: String,
-}
+fn parse_doh_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), DohError> {
+    let response = Message::from_vec(body).map_err(|e| DohError::Parse(e.to_string()))?;
 
-fn default_ttl() -> u64 {
-    300
-}
-
-pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), String> {
-    let resp: DohResponse =
-        serde_json::from_slice(body).map_err(|e| format!("invalid DoH JSON: {e}"))?;
-
-    if resp.status != 0 {
-        let name = match resp.status {
-            1 => "FORMERR",
-            2 => "SERVFAIL",
-            3 => "NXDOMAIN",
-            5 => "REFUSED",
-            _ => "ERROR",
-        };
-        return Err(format!("DNS {name} (status {})", resp.status));
+    if response.response_code() != ResponseCode::NoError {
+        return Err(DohError::DnsResponse(response.response_code()));
     }
 
     let mut min_ttl = u64::MAX;
     let mut records = Vec::new();
 
-    for a in &resp.answer {
-        min_ttl = min_ttl.min(a.ttl);
-        if let Some(rtype) = RecordType::from_wire(a.rtype) {
+    for answer in response.answers() {
+        let maybe_type = RecordType::from_wire(u16::from(answer.record_type()));
+        if let Some(rtype) = maybe_type {
+            min_ttl = min_ttl.min(u64::from(answer.ttl()));
             records.push(crate::DnsRecord {
                 rtype,
-                value: a.data.clone(),
+                value: answer.data().to_string(),
             });
         }
     }
@@ -255,10 +296,10 @@ pub(crate) fn reverse_query(
     config: &ResolverConfig,
     resolver: Option<&str>,
     ip: &str,
-) -> Result<SingleEffect, String> {
+) -> Result<SingleEffect, ProviderError> {
     let addr = ip
         .parse::<IpAddr>()
-        .map_err(|_| format!("invalid IP address: {ip}"))?;
+        .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
     let ptr_domain = match addr {
         IpAddr::V4(addr) => ip_to_in_addr_arpa(addr),
         IpAddr::V6(addr) => ip_to_ip6_arpa(addr),
@@ -298,7 +339,7 @@ mod tests {
     use super::*;
 
     fn default_config() -> ResolverConfig {
-        ResolverConfig::from_toml(b"")
+        ResolverConfig::from_json(b"{}")
     }
 
     #[test]
@@ -319,13 +360,16 @@ mod tests {
 
     #[test]
     fn custom_resolver_from_config() {
-        let toml = br#"
-            default_resolver = "quad9"
-
-            [resolvers]
-            quad9 = { url = "https://dns.quad9.net:5053/dns-query", aliases = ["9.9.9.9"] }
-        "#;
-        let cfg = ResolverConfig::from_toml(toml);
+        let json = br#"{
+            "default_resolver": "quad9",
+            "resolvers": {
+                "quad9": {
+                    "url": "https://dns.quad9.net:5053/dns-query",
+                    "aliases": ["9.9.9.9"]
+                }
+            }
+        }"#;
+        let cfg = ResolverConfig::from_json(json);
         assert_eq!(
             cfg.resolve_endpoint(None),
             "https://dns.quad9.net:5053/dns-query"
@@ -372,24 +416,24 @@ mod tests {
         let cfg = default_config();
         assert!(matches!(
             reverse_query(&cfg, None, "1:2:3:4:5:6:7:8:9"),
-            Err(err) if err.contains("invalid IP address")
+            Err(err) if format!("{err}").contains("invalid IP address")
         ));
         assert!(matches!(
             reverse_query(&cfg, None, "999.184.216.34"),
-            Err(err) if err.contains("invalid IP address")
+            Err(err) if format!("{err}").contains("invalid IP address")
         ));
     }
 
     #[test]
     fn parse_doh_response() {
-        let json = br#"{
-            "Status": 0,
-            "Answer": [
-                {"name": "example.com.", "type": 1, "TTL": 300, "data": "93.184.216.34"},
-                {"name": "example.com.", "type": 1, "TTL": 200, "data": "93.184.216.35"}
-            ]
-        }"#;
-        let (records, ttl) = parse_response(json).unwrap();
+        let response = make_dns_message_response(
+            ResponseCode::NoError,
+            [
+                ("example.com", 300, "93.184.216.34"),
+                ("example.com", 200, "93.184.216.35"),
+            ],
+        );
+        let (records, ttl) = parse_response(&response).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].value, "93.184.216.34");
         assert_eq!(records[1].value, "93.184.216.35");
@@ -398,8 +442,31 @@ mod tests {
 
     #[test]
     fn parse_nxdomain() {
-        let err = parse_response(br#"{"Status": 3}"#).unwrap_err();
-        assert!(err.contains("NXDOMAIN"));
+        let response = make_dns_message_response(ResponseCode::NXDomain, []);
+        let err = parse_response(&response).unwrap_err();
+        assert!(err.to_string().contains("NXDOMAIN"));
+    }
+
+    fn make_dns_message_response(
+        response_code: ResponseCode,
+        answers: impl IntoIterator<Item = (&'static str, u32, &'static str)>,
+    ) -> Vec<u8> {
+        let mut response = Message::new();
+        response.set_response_code(response_code);
+        let records: Vec<_> = answers
+            .into_iter()
+            .map(|(domain, ttl, address)| make_a_record(domain, ttl, address))
+            .collect();
+        response.add_answers(records);
+        response.to_vec().unwrap()
+    }
+
+    fn make_a_record(domain: &str, ttl: u32, address: &str) -> Record {
+        Record::from_rdata(
+            Name::from_ascii(domain).unwrap(),
+            ttl,
+            RData::A(A(address.parse::<std::net::Ipv4Addr>().unwrap())),
+        )
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! and returns `DisownedTree` to hand the subtree to FUSE passthrough.
 
 use super::err;
-use crate::omnifs::provider::types::*;
+use omnifs_sdk::prelude::*;
 
 /// Resume after `OpenRepo`. Returns `DisownedTree` to hand the subtree to FUSE passthrough.
 pub fn resume_open_repo_disown(_id: u64, result: &SingleEffectResult) -> ProviderResponse {
@@ -12,7 +12,7 @@ pub fn resume_open_repo_disown(_id: u64, result: &SingleEffectResult) -> Provide
         SingleEffectResult::GitRepoOpened(info) => {
             ProviderResponse::Done(ActionResult::DisownedTree(info.tree))
         }
-        SingleEffectResult::EffectError(e) => err(&format!("git open failed: {}", e.message)),
-        _ => err("unexpected result"),
+        SingleEffectResult::EffectError(e) => err(ProviderError::from_effect_error(e)),
+        _ => err(ProviderError::internal("unexpected result")),
     }
 }

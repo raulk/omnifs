@@ -144,8 +144,8 @@ pub enum LookupPayload {
 }
 
 impl LookupPayload {
-    pub fn serialize(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("LookupPayload serialization is infallible")
+    pub fn serialize(&self) -> Option<Vec<u8>> {
+        postcard::to_allocvec(self).ok()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
@@ -160,8 +160,8 @@ pub struct AttrPayload {
 }
 
 impl AttrPayload {
-    pub fn serialize(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("AttrPayload serialization is infallible")
+    pub fn serialize(&self) -> Option<Vec<u8>> {
+        postcard::to_allocvec(self).ok()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
@@ -186,8 +186,8 @@ pub struct DirentsPayload {
 }
 
 impl DirentsPayload {
-    pub fn serialize(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("DirentsPayload serialization is infallible")
+    pub fn serialize(&self) -> Option<Vec<u8>> {
+        postcard::to_allocvec(self).ok()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {

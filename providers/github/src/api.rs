@@ -2,7 +2,7 @@
 //!
 //! Helper functions to construct GitHub API requests and parse JSON responses.
 
-use crate::omnifs::provider::types::*;
+use omnifs_sdk::prelude::*;
 
 /// Build an HTTP GET request for the GitHub API.
 pub fn github_get(path: &str) -> SingleEffect {
@@ -25,6 +25,7 @@ pub fn github_get(path: &str) -> SingleEffect {
 }
 
 /// Parse a JSON API response body, returning the parsed value or an error string.
-pub fn parse_json(body: &[u8]) -> Result<serde_json::Value, String> {
-    serde_json::from_slice(body).map_err(|e| format!("JSON parse error: {e}"))
+pub fn parse_json(body: &[u8]) -> Result<serde_json::Value, ProviderError> {
+    serde_json::from_slice(body)
+        .map_err(|e| ProviderError::invalid_input(format!("JSON parse error: {e}")))
 }

@@ -366,36 +366,40 @@ impl FuseFs {
                     kind: kind_cache,
                     size,
                 };
-                let record = CacheRecord::new(
-                    RecordKind::Lookup,
-                    crate::cache::ttl::LOOKUP_POSITIVE,
-                    payload.serialize(),
-                );
-                runtime.cache_put(child_path, RecordKind::Lookup, &record);
-                self.l0_put(
-                    mount_name,
-                    parent_ino,
-                    RecordKind::Lookup,
-                    Some(name_str.to_string()),
-                    record,
-                );
+                if let Some(encoded) = payload.serialize() {
+                    let record = CacheRecord::new(
+                        RecordKind::Lookup,
+                        crate::cache::ttl::LOOKUP_POSITIVE,
+                        encoded,
+                    );
+                    runtime.cache_put(child_path, RecordKind::Lookup, &record);
+                    self.l0_put(
+                        mount_name,
+                        parent_ino,
+                        RecordKind::Lookup,
+                        Some(name_str.to_string()),
+                        record,
+                    );
+                }
                 Ok(self.attr_for_kind(ino, entry.kind, size))
             }
             Ok(ActionResult::DirEntryOption(None)) => {
                 let neg = crate::cache::LookupPayload::Negative;
-                let record = CacheRecord::new(
-                    RecordKind::Lookup,
-                    crate::cache::ttl::LOOKUP_NEGATIVE,
-                    neg.serialize(),
-                );
-                runtime.cache_put(child_path, RecordKind::Lookup, &record);
-                self.l0_put(
-                    mount_name,
-                    parent_ino,
-                    RecordKind::Lookup,
-                    Some(name_str.to_string()),
-                    record,
-                );
+                if let Some(encoded) = neg.serialize() {
+                    let record = CacheRecord::new(
+                        RecordKind::Lookup,
+                        crate::cache::ttl::LOOKUP_NEGATIVE,
+                        encoded,
+                    );
+                    runtime.cache_put(child_path, RecordKind::Lookup, &record);
+                    self.l0_put(
+                        mount_name,
+                        parent_ino,
+                        RecordKind::Lookup,
+                        Some(name_str.to_string()),
+                        record,
+                    );
+                }
                 Err(Errno::ENOENT)
             }
             Ok(_) | Err(_) => Err(Errno::EIO),
@@ -537,13 +541,12 @@ impl FuseFs {
                     entries: dirent_records,
                     exhaustive: listing.exhaustive,
                 };
-                let dirents_record = CacheRecord::new(
-                    RecordKind::Dirents,
-                    crate::cache::ttl::DIRENTS,
-                    dirents_payload.serialize(),
-                );
-                runtime.cache_put(path, RecordKind::Dirents, &dirents_record);
-                self.l0_put(mount_name, ino, RecordKind::Dirents, None, dirents_record);
+                if let Some(encoded) = dirents_payload.serialize() {
+                    let dirents_record =
+                        CacheRecord::new(RecordKind::Dirents, crate::cache::ttl::DIRENTS, encoded);
+                    runtime.cache_put(path, RecordKind::Dirents, &dirents_record);
+                    self.l0_put(mount_name, ino, RecordKind::Dirents, None, dirents_record);
+                }
                 Ok(snapshot)
             }
             _ => Err(Errno::EIO),
@@ -878,8 +881,22 @@ impl Filesystem for FuseFs {
                 reply.data(data_slice(&data, offset, size));
                 self.file_cache.insert(fh.0, data);
             }
+            Ok(ActionResult::ProviderErr(error)) => {
+                tracing::warn!(
+                    path,
+                    kind = ?error.kind,
+                    retryable = error.retryable,
+                    message = error.message,
+                    "provider returned typed error for read_file"
+                );
+                reply.error(Errno::EIO);
+            }
             Ok(ActionResult::Err(msg)) => {
-                tracing::warn!(path, error = msg, "provider returned error for read_file");
+                tracing::warn!(
+                    path,
+                    error = msg,
+                    "provider returned legacy error string for read_file"
+                );
                 reply.error(Errno::EIO);
             }
             Ok(other) => {

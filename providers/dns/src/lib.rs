@@ -1,29 +1,16 @@
-wit_bindgen::generate!({
-    path: "../../wit",
-    world: "provider",
-});
+use omnifs_sdk::prelude::*;
 
 mod browse;
 mod doh;
-pub(crate) mod path;
+pub(crate) mod types;
 
-use hashbrown::HashMap;
-use omnifs::provider::types::*;
-use path::RecordType;
-use std::cell::RefCell;
+use types::{DomainName, RecordType, Segment};
 
-struct DnsProvider;
-
-thread_local! {
-    static STATE: RefCell<Option<ProviderState>> = const { RefCell::new(None) };
-}
-
-pub(crate) struct ProviderState {
-    pending: HashMap<u64, Continuation>,
+pub(crate) struct State {
     pub resolvers: doh::ResolverConfig,
 }
 
-enum Continuation {
+pub(crate) enum Continuation {
     Single,
     All { results: Vec<DnsRecord> },
     Raw { domain: String },
@@ -35,58 +22,38 @@ pub(crate) struct DnsRecord {
     pub value: String,
 }
 
-fn with_state<F, R>(f: F) -> Result<R, String>
-where
-    F: FnOnce(&mut ProviderState) -> R,
-{
-    STATE.with(|s| {
-        let mut borrow = s.borrow_mut();
-        match borrow.as_mut() {
-            Some(state) => Ok(f(state)),
-            None => Err("provider not initialized".to_string()),
-        }
-    })
+#[omnifs_sdk::config]
+struct Config {
+    #[serde(default = "default_resolver_name")]
+    default_resolver: String,
+    #[serde(default)]
+    resolvers: std::collections::BTreeMap<String, ConfigResolver>,
 }
 
-impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
-    fn initialize(config: Vec<u8>) -> ProviderResponse {
-        let resolvers = doh::ResolverConfig::from_toml(&config);
-        STATE.with(|s| {
-            *s.borrow_mut() = Some(ProviderState {
-                pending: HashMap::new(),
-                resolvers,
-            });
-        });
-        ProviderResponse::Done(ActionResult::ProviderInitialized(ProviderInfo {
-            name: "dns-provider".to_string(),
-            version: "0.1.0".to_string(),
-            description: "DNS record browsing via DNS-over-HTTPS".to_string(),
-        }))
-    }
+fn default_resolver_name() -> String {
+    String::from("cloudflare")
+}
 
-    fn shutdown() {
-        STATE.with(|s| *s.borrow_mut() = None);
-    }
+#[omnifs_sdk::config]
+struct ConfigResolver {
+    url: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
 
-    fn get_config_schema() -> ConfigSchema {
-        ConfigSchema {
-            fields: vec![
-                ConfigField {
-                    name: "default_resolver".to_string(),
-                    field_type: "string".to_string(),
-                    required: false,
-                    default_value: Some("cloudflare".to_string()),
-                    description: "Default resolver alias used when no @resolver prefix".to_string(),
-                },
-                ConfigField {
-                    name: "resolvers".to_string(),
-                    field_type: "table".to_string(),
-                    required: false,
-                    default_value: None,
-                    description: "Named resolver aliases mapping to DoH endpoint URLs".to_string(),
-                },
-            ],
-        }
+#[allow(clippy::unnecessary_wraps)]
+#[omnifs_sdk::provider]
+impl DnsProvider {
+    fn init(config: Config) -> (State, ProviderInfo) {
+        let resolvers = doh::ResolverConfig::from_config(config.default_resolver, config.resolvers);
+        (
+            State { resolvers },
+            ProviderInfo {
+                name: "dns-provider".to_string(),
+                version: "0.1.0".to_string(),
+                description: "DNS record browsing via DNS-over-HTTPS".to_string(),
+            },
+        )
     }
 
     fn capabilities() -> RequestedCapabilities {
@@ -100,65 +67,201 @@ impl exports::omnifs::provider::lifecycle::Guest for DnsProvider {
             refresh_interval_secs: 0,
         }
     }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn resume(id: u64, cont: Continuation, outcome: EffectResult) -> ProviderResponse {
+        browse::resume(id, cont, outcome)
+    }
+
+    #[route("/")]
+    fn root(op: Op) -> Option<ProviderResponse> {
+        match op {
+            Op::Lookup(_) => None,
+            Op::List(_) => {
+                let mut entries = vec![mk_file("_resolvers"), mk_dir("_reverse")];
+                for name in browse::resolver_dir_names() {
+                    entries.push(mk_dir(name));
+                }
+                Some(ProviderResponse::Done(ActionResult::DirEntries(
+                    DirListing {
+                        entries,
+                        exhaustive: false,
+                    },
+                )))
+            }
+            Op::Read(_) => Some(err(ProviderError::invalid_input("not a file"))),
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    #[route("/_resolvers")]
+    fn resolvers_file(op: Op) -> Option<ProviderResponse> {
+        file_only(op, "_resolvers", |_| browse::resolvers_content())
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    #[route("/_reverse")]
+    fn reverse_root(op: Op) -> Option<ProviderResponse> {
+        dir_only(op, "_reverse", |_| {
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![],
+                exhaustive: false,
+            }))
+        })
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    #[route("/_reverse/{ip}")]
+    fn reverse_ip(op: Op, ip: &str) -> Option<ProviderResponse> {
+        file_only(op, ip, |id| Self::read_reverse_ip(id, None, ip))
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    #[route("/@{segment}")]
+    fn resolver_root(op: Op, segment: &str) -> Option<ProviderResponse> {
+        let segment = format!("@{segment}");
+
+        dir_only(op, segment, |_| {
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![],
+                exhaustive: false,
+            }))
+        })
+    }
+
+    #[route("/{segment}")]
+    fn segment(op: Op, segment: Segment) -> Option<ProviderResponse> {
+        match segment {
+            Segment::Ip(ip) => {
+                let segment = ip.to_string();
+                file_only(op, &segment, |id| Self::read_reverse_ip(id, None, &segment))
+            }
+            Segment::Domain(domain) => {
+                let segment = domain.as_ref();
+                dir_only(op, segment, |_| Self::list_domain())
+            }
+        }
+    }
+
+    #[route("/@{resolver}/{segment}")]
+    fn resolver_segment(op: Op, resolver: &str, segment: Segment) -> Option<ProviderResponse> {
+        match segment {
+            Segment::Ip(ip) => {
+                let segment = ip.to_string();
+                file_only(op, &segment, |id| {
+                    Self::read_reverse_ip(id, Some(resolver), &segment)
+                })
+            }
+            Segment::Domain(domain) => {
+                let segment = domain.as_ref();
+                dir_only(op, segment, |_| Self::list_domain())
+            }
+        }
+    }
+
+    #[route("/{domain}/{record}")]
+    fn domain_record(op: Op, domain: DomainName, record: &str) -> Option<ProviderResponse> {
+        let domain = domain.as_ref();
+        Self::record_handler(op, None, domain, record)
+    }
+
+    #[route("/@{resolver}/{domain}/{record}")]
+    fn resolver_domain_record(
+        op: Op,
+        resolver: &str,
+        domain: DomainName,
+        record: &str,
+    ) -> Option<ProviderResponse> {
+        let domain = domain.as_ref();
+        Self::record_handler(op, Some(resolver), domain, record)
+    }
+
+    fn list_domain() -> ProviderResponse {
+        let mut entries: Vec<DirEntry> = RecordType::all()
+            .iter()
+            .map(|rt| mk_file(rt.as_ref()))
+            .collect();
+        entries.push(mk_file("_all"));
+        entries.push(mk_file("_raw"));
+        ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+            entries,
+            exhaustive: true,
+        }))
+    }
+
+    fn record_handler(
+        op: Op,
+        resolver: Option<&str>,
+        domain: &str,
+        record_name: &str,
+    ) -> Option<ProviderResponse> {
+        match record_name {
+            "_all" => file_only(op, "_all", |id| Self::read_all(id, resolver, domain)),
+            "_raw" => file_only(op, "_raw", |id| Self::read_raw(id, resolver, domain)),
+            "PTR" => None,
+            _ => {
+                let rtype = record_name.parse::<RecordType>().ok()?;
+                file_only(op, record_name, |id| {
+                    Self::read_record(id, resolver, domain, rtype)
+                })
+            }
+        }
+    }
+
+    fn read_record(
+        id: u64,
+        resolver: Option<&str>,
+        domain: &str,
+        rtype: RecordType,
+    ) -> ProviderResponse {
+        let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, rtype)) {
+            Ok(e) => e,
+            Err(e) => return err(ProviderError::internal(e)),
+        };
+        dispatch(id, Continuation::Single, effect)
+    }
+
+    fn read_all(id: u64, resolver: Option<&str>, domain: &str) -> ProviderResponse {
+        let types = RecordType::common();
+        let effects = match with_state(|s| {
+            types
+                .iter()
+                .map(|&rt| doh::query(&s.resolvers, resolver, domain, rt))
+                .collect()
+        }) {
+            Ok(e) => e,
+            Err(e) => return err(ProviderError::internal(e)),
+        };
+        dispatch_batch(
+            id,
+            Continuation::All {
+                results: Vec::new(),
+            },
+            effects,
+        )
+    }
+
+    fn read_raw(id: u64, resolver: Option<&str>, domain: &str) -> ProviderResponse {
+        let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A))
+        {
+            Ok(e) => e,
+            Err(e) => return err(ProviderError::internal(e)),
+        };
+        dispatch(
+            id,
+            Continuation::Raw {
+                domain: domain.to_string(),
+            },
+            effect,
+        )
+    }
+
+    fn read_reverse_ip(id: u64, resolver: Option<&str>, ip: &str) -> ProviderResponse {
+        let effect = match with_state(|s| doh::reverse_query(&s.resolvers, resolver, ip)) {
+            Ok(Ok(effect)) => effect,
+            Ok(Err(e)) => return err(e),
+            Err(e) => return err(ProviderError::internal(e)),
+        };
+        dispatch(id, Continuation::Single, effect)
+    }
 }
-
-impl exports::omnifs::provider::browse::Guest for DnsProvider {
-    fn lookup_child(id: u64, parent_path: String, name: String) -> ProviderResponse {
-        browse::lookup_child(id, &parent_path, &name)
-    }
-
-    fn list_children(id: u64, path: String) -> ProviderResponse {
-        browse::list_children(id, &path)
-    }
-
-    fn read_file(id: u64, path: String) -> ProviderResponse {
-        browse::read_file(id, &path)
-    }
-
-    fn open_file(_id: u64, _path: String) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::FileOpened(1))
-    }
-
-    fn read_chunk(_id: u64, _handle: u64, _offset: u64, _len: u32) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::FileChunk(vec![]))
-    }
-
-    fn close_file(_handle: u64) {}
-}
-
-impl exports::omnifs::provider::resume::Guest for DnsProvider {
-    fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
-        browse::resume(id, effect_outcome)
-    }
-
-    fn cancel(id: u64) {
-        let _ = with_state(|s| {
-            s.pending.remove(&id);
-        });
-    }
-}
-
-const NOT_IMPL: &str = "not implemented";
-
-impl exports::omnifs::provider::reconcile::Guest for DnsProvider {
-    fn plan_mutations(_id: u64, _changes: Vec<FileChange>) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
-    }
-    fn execute(_id: u64, _mutation: PlannedMutation) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
-    }
-    fn fetch_resource(_id: u64, _resource_path: String) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
-    }
-    fn list_scope(_id: u64, _scope: String) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Err(NOT_IMPL.to_string()))
-    }
-}
-
-impl exports::omnifs::provider::notify::Guest for DnsProvider {
-    fn on_event(_id: u64, _event: ProviderEvent) -> ProviderResponse {
-        ProviderResponse::Done(ActionResult::Ok)
-    }
-}
-
-export!(DnsProvider);

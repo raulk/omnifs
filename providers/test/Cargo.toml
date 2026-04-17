@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-wit-bindgen = "0.41"
+omnifs-sdk = { path = "../../crates/omnifs-sdk" }
 
 [package.metadata.component]
 package = "omnifs:provider"

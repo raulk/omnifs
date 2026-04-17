@@ -1,10 +1,11 @@
-//! Browse module: filesystem routing and async continuations.
+//! Browse module: async continuations and shared helpers.
 //!
-//! Routes provider browse requests to the appropriate handlers and manages
-//! the async continuation state machine for GitHub API operations.
+//! Routes are now handled by the `#[route]` handlers in `lib.rs`.
+//! This module manages the resume state machine for GitHub API operations.
 
-use crate::omnifs::provider::types::*;
-use crate::{Continuation, SingleEffect, SingleEffectResult, with_state};
+use crate::Continuation;
+use crate::with_state;
+use omnifs_sdk::prelude::*;
 
 pub const MAX_CONTENT_SIZE: usize = 10 * 1024 * 1024;
 const TRUNCATION_MARKER: &[u8] = b"\n[truncated at 10MB]\n";
@@ -16,38 +17,23 @@ mod events;
 mod files;
 mod git;
 mod resources;
-mod routing;
 
-// Re-exports
 pub use events::timer_tick;
-pub use routing::{list_children, lookup_child, read_file};
 
 // Re-export types needed by submodules
 pub(crate) use crate::CachedRepoListMode;
 
-/// Path structure:
-///   ""                         -> list owners (from cache)
-///   "<owner>"                  -> list repos
-///   "<owner>/<repo>"           -> list namespace dirs: _repo, _issues, _prs, _actions
-///   "<owner>/<repo>/_repo/..." -> git tree browsing
-///   "<owner>/<repo>/_issues/_open/<num>/..." -> issue files
-///   "<owner>/<repo>/_prs/_open/<num>/..."    -> PR files
-///   "<owner>/<repo>/_actions/runs/<id>/..."  -> action run files
-#[allow(clippy::needless_pass_by_value)] // EffectResult is owned from the WIT trait boundary
-pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
-    let continuation = match with_state(|state| state.pending.remove(&id)) {
-        Ok(Some(c)) => c,
-        Ok(None) => return err("no pending continuation"),
-        Err(e) => return err(&e),
-    };
-
+#[allow(clippy::needless_pass_by_value)]
+pub fn resume(id: u64, cont: Continuation, effect_outcome: EffectResult) -> ProviderResponse {
     let result = match &effect_outcome {
         EffectResult::Single(r) => r,
         EffectResult::Batch(results) if !results.is_empty() => &results[0],
-        EffectResult::Batch(_) => return err("empty batch result"),
+        EffectResult::Batch(_) => {
+            return err(ProviderError::internal("empty batch result"));
+        }
     };
 
-    match continuation {
+    match cont {
         Continuation::ListingCachedRepos { path, mode } => {
             resources::resume_cached_repos(&path, &mode, result)
         }
@@ -84,16 +70,18 @@ pub fn resume(id: u64, effect_outcome: EffectResult) -> ProviderResponse {
 
 // --- Shared helpers ---
 
-pub(crate) fn err(msg: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::Err(msg.to_string()))
+pub(crate) fn err(error: impl Into<ProviderError>) -> ProviderResponse {
+    omnifs_sdk::prelude::err(error)
 }
 
-pub(crate) fn dispatch(id: u64, cont: Continuation, effect: SingleEffect) -> ProviderResponse {
-    match with_state(|state| {
-        state.pending.insert(id, cont);
-    }) {
-        Ok(()) => ProviderResponse::Effect(effect),
-        Err(e) => err(&e),
+pub(crate) fn dispatch_or_err(
+    id: u64,
+    cont: Continuation,
+    effect: SingleEffect,
+) -> ProviderResponse {
+    match crate::with_pending(|p| p.insert(id, cont)) {
+        Ok(_) => ProviderResponse::Effect(effect),
+        Err(e) => err(ProviderError::internal(e)),
     }
 }
 
@@ -114,8 +102,12 @@ pub(crate) fn is_unauthorized(result: &SingleEffectResult) -> bool {
     )
 }
 
+pub(crate) fn get_cached(key: &str) -> Result<Option<Vec<u8>>, String> {
+    with_state(|state| state.cache.get(key).map(<[u8]>::to_vec))
+}
+
 pub(crate) fn touch_repo(owner: &str, repo: &str) {
-    if !crate::path::is_safe_segment(owner) || !crate::path::is_safe_segment(repo) {
+    if !crate::types::is_safe_segment(owner) || !crate::types::is_safe_segment(repo) {
         return;
     }
     let _ = with_state(|state| {
@@ -129,18 +121,18 @@ pub(crate) fn extract_http_body(result: &SingleEffectResult) -> Result<&[u8], Pr
         SingleEffectResult::HttpResponse(resp) => {
             check_rate_limit(resp);
             if resp.status >= 400 {
-                Err(err(&format!("API error: {}", resp.status)))
+                Err(err(ProviderError::from_http_status(resp.status)))
             } else {
                 Ok(&resp.body)
             }
         }
-        SingleEffectResult::EffectError(e) => Err(err(&format!("effect error: {}", e.message))),
-        _ => Err(err("unexpected effect result type")),
+        SingleEffectResult::EffectError(e) => Err(err(ProviderError::from_effect_error(e))),
+        _ => Err(err(ProviderError::internal(
+            "unexpected effect result type",
+        ))),
     }
 }
 
-/// Track X-RateLimit-Remaining from GitHub API responses. Stores the
-/// value in `ProviderState` and logs a warning via the host when low.
 pub(crate) fn check_rate_limit(resp: &HttpResponse) {
     let Some(remaining) = http_header_value(resp, "x-ratelimit-remaining")
         .and_then(|value| value.parse::<u32>().ok())
@@ -162,7 +154,7 @@ pub(crate) fn check_rate_limit(resp: &HttpResponse) {
             }
             None => format!("GitHub API {resource} rate limit low: {remaining} remaining"),
         };
-        crate::omnifs::provider::log::log(&LogEntry {
+        omnifs_sdk::omnifs::provider::log::log(&LogEntry {
             level: LogLevel::Warn,
             message,
         });
@@ -191,24 +183,6 @@ pub(crate) fn truncate_content(mut data: Vec<u8>) -> Vec<u8> {
     data.truncate(MAX_CONTENT_SIZE.saturating_sub(TRUNCATION_MARKER.len()));
     data.extend_from_slice(TRUNCATION_MARKER);
     data
-}
-
-pub(crate) fn dir_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-        name: name.to_string(),
-        kind: EntryKind::Directory,
-        size: None,
-        projected_files: None,
-    })))
-}
-
-pub(crate) fn file_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-        name: name.to_string(),
-        kind: EntryKind::File,
-        size: Some(4096),
-        projected_files: None,
-    })))
 }
 
 // Re-export helper functions that submodules need from resources module

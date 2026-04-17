@@ -28,11 +28,13 @@ fn make_engine() -> wasmtime::Engine {
 fn make_runtime(engine: &wasmtime::Engine) -> EffectRuntime {
     let config = omnifs_host::config::InstanceConfig::parse(
         r#"
-        plugin = "test_provider.wasm"
-        mount = "test"
-
-        [capabilities]
-        domains = ["httpbin.org"]
+        {
+            "plugin": "test_provider.wasm",
+            "mount": "test",
+            "capabilities": {
+                "domains": ["httpbin.org"]
+            }
+        }
     "#,
     )
     .unwrap();
@@ -54,7 +56,7 @@ fn make_runtime(engine: &wasmtime::Engine) -> EffectRuntime {
 async fn test_initialize() {
     let engine = make_engine();
     let rt = make_runtime(&engine);
-    let result = rt.initialize(b"").unwrap();
+    let result = rt.initialize().unwrap();
     match result {
         ActionResult::ProviderInitialized(info) => {
             assert_eq!(info.name, "test-provider");
@@ -139,6 +141,7 @@ async fn test_lookup_child_not_found() {
 async fn test_effect_resume_loop() {
     let engine = make_engine();
     let rt = make_runtime(&engine);
+    rt.initialize().unwrap();
     let result = rt.call_read_file("hello/cached").await.unwrap();
     match result {
         ActionResult::FileContent(data) => {

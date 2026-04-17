@@ -92,7 +92,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
             for mount_name in registry.mounts() {
                 if let Some(runtime) = registry.get(&mount_name) {
-                    match runtime.initialize(&[]) {
+                    match runtime.initialize() {
                         Ok(_) => tracing::info!(mount = mount_name, "provider initialized"),
                         Err(e) => tracing::warn!(mount = mount_name, error = %e, "init failed"),
                     }

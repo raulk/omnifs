@@ -3,12 +3,14 @@
 //! Handles listing cached repos, fetching search results for issues/PRs,
 //! and paginating through GitHub API responses.
 
-use super::{dispatch, enter_cache_only, err, is_unauthorized, with_state};
+use super::{dispatch_or_err, enter_cache_only, err, is_unauthorized};
 use crate::api;
-use crate::omnifs::provider::types::*;
-use crate::path::{FsPath, ResourceKind, StateFilter};
+use crate::path::FsPath;
+use crate::types::{RepoId, ResourceKind, StateFilter, github_owner_cache_prefix};
+use crate::with_state;
 use crate::{Continuation, SingleEffect};
 use hashbrown::HashSet;
+use omnifs_sdk::prelude::*;
 
 pub fn resume_cached_repos(
     path: &str,
@@ -18,9 +20,9 @@ pub fn resume_cached_repos(
     let repos = match result {
         SingleEffectResult::GitCachedRepos(repos) => repos,
         SingleEffectResult::EffectError(e) => {
-            return err(&format!("git cache list failed: {}", e.message));
+            return err(ProviderError::from_effect_error(e));
         }
-        _ => return err("unexpected cached repo result"),
+        _ => return err(ProviderError::internal("unexpected cached repo result")),
     };
 
     match mode {
@@ -36,15 +38,7 @@ pub fn resume_cached_repos(
                     owners.insert(owner.to_string());
                 }
             }
-            let mut entries: Vec<DirEntry> = owners
-                .into_iter()
-                .map(|name| DirEntry {
-                    name,
-                    kind: EntryKind::Directory,
-                    size: None,
-                    projected_files: None,
-                })
-                .collect();
+            let mut entries: Vec<DirEntry> = owners.into_iter().map(mk_dir).collect();
             entries.sort_by(|a, b| a.name.cmp(&b.name));
             ProviderResponse::Done(ActionResult::DirEntries(DirListing {
                 entries,
@@ -58,12 +52,7 @@ pub fn resume_cached_repos(
                     // cache_key format: "github.com/owner/repo"
                     let rest = repo.cache_key.strip_prefix("github.com/")?;
                     let repo_name = rest.split('/').nth(1)?;
-                    Some(DirEntry {
-                        name: repo_name.to_string(),
-                        kind: EntryKind::Directory,
-                        size: None,
-                        projected_files: None,
-                    })
+                    Some(mk_dir(repo_name.to_string()))
                 })
                 .collect();
             entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -86,7 +75,7 @@ pub fn resume_cached_repos(
                     .and_then(|rest| rest.split('/').nth(1))
                     .is_some_and(|name| name == repo_name)
             }) {
-                super::dir_entry(repo_name)
+                dir_entry(repo_name)
             } else {
                 ProviderResponse::Done(ActionResult::DirEntryOption(None))
             }
@@ -103,7 +92,7 @@ pub fn resume_owner_profile(
     result: &SingleEffectResult,
 ) -> ProviderResponse {
     let Some(FsPath::Owner { owner }) = FsPath::parse(path) else {
-        return err("expected owner path");
+        return err(ProviderError::internal("expected owner path"));
     };
 
     let status = match result {
@@ -121,7 +110,7 @@ pub fn resume_owner_profile(
                 exhaustive: true,
             }));
         }
-        return dispatch(
+        return dispatch_or_err(
             id,
             Continuation::FetchingOwnerProfile {
                 path: path.to_string(),
@@ -133,14 +122,14 @@ pub fn resume_owner_profile(
 
     if is_unauthorized(result) {
         enter_cache_only();
-        return dispatch(
+        return dispatch_or_err(
             id,
             Continuation::ListingCachedRepos {
                 path: path.to_string(),
                 mode: super::CachedRepoListMode::Owner,
             },
             SingleEffect::GitListCachedRepos(GitCacheListRequest {
-                prefix: Some(format!("github.com/{owner}/")),
+                prefix: Some(github_owner_cache_prefix(owner)),
             }),
         );
     }
@@ -151,7 +140,7 @@ pub fn resume_owner_profile(
     };
     let json = match crate::api::parse_json(body) {
         Ok(j) => j,
-        Err(e) => return err(&e),
+        Err(e) => return err(e),
     };
 
     let owner_kind = match json.get("type").and_then(|v| v.as_str()) {
@@ -178,7 +167,7 @@ pub fn resume_owner_profile(
     };
 
     if page_count <= 1 {
-        return dispatch(
+        return dispatch_or_err(
             id,
             Continuation::FetchingRepoPages {
                 path: path.to_string(),
@@ -191,8 +180,8 @@ pub fn resume_owner_profile(
         .map(|page| crate::api::github_get(&format!("{repos_path}&page={page}")))
         .collect();
 
-    match with_state(|state| {
-        state.pending.insert(
+    match crate::with_pending(|p| {
+        p.insert(
             id,
             Continuation::FetchingRepoPages {
                 path: path.to_string(),
@@ -200,14 +189,14 @@ pub fn resume_owner_profile(
         );
     }) {
         Ok(()) => ProviderResponse::Batch(fetches),
-        Err(e) => err(&e),
+        Err(e) => err(e),
     }
 }
 
 /// Handle repo listing pages (single or batch). Merge results, cache, return entries.
 pub fn resume_repo_pages(_id: u64, path: &str, effect_outcome: &EffectResult) -> ProviderResponse {
     let Some(FsPath::Owner { owner }) = FsPath::parse(path) else {
-        return err("expected owner path");
+        return err(ProviderError::internal("expected owner path"));
     };
 
     let results: Vec<&SingleEffectResult> = match effect_outcome {
@@ -243,15 +232,7 @@ pub fn resume_repo_pages(_id: u64, path: &str, effect_outcome: &EffectResult) ->
             .insert(owner.to_string(), (tick, repos.clone()));
     });
 
-    let entries = repos
-        .into_iter()
-        .map(|name| DirEntry {
-            name,
-            kind: EntryKind::Directory,
-            size: None,
-            projected_files: None,
-        })
-        .collect();
+    let entries = repos.into_iter().map(mk_dir).collect();
     ProviderResponse::Done(ActionResult::DirEntries(DirListing {
         entries,
         exhaustive: false,
@@ -273,14 +254,14 @@ pub fn resume_list_first_page(
         if let Some(ref p) = fs_path {
             match p {
                 FsPath::Owner { owner } => {
-                    return dispatch(
+                    return dispatch_or_err(
                         id,
                         Continuation::ListingCachedRepos {
                             path: path.to_string(),
                             mode: super::CachedRepoListMode::Owner,
                         },
                         SingleEffect::GitListCachedRepos(GitCacheListRequest {
-                            prefix: Some(format!("github.com/{}/", *owner)),
+                            prefix: Some(github_owner_cache_prefix(owner)),
                         }),
                     );
                 }
@@ -318,7 +299,7 @@ pub fn resume_list_first_page(
                 }));
             }
             let api_path = format!("/orgs/{owner}/repos?per_page=100&sort=updated");
-            return dispatch(
+            return dispatch_or_err(
                 id,
                 Continuation::FetchingFirstPage {
                     path: path.to_string(),
@@ -336,24 +317,22 @@ pub fn resume_list_first_page(
 
     let json = match api::parse_json(body) {
         Ok(j) => j,
-        Err(e) => return err(&e),
+        Err(e) => return err(e),
     };
 
     match &fs_path {
         Some(FsPath::Owner { .. }) => {
             let Some(arr) = json.as_array() else {
-                return err("expected array in repo listing response");
+                return err(ProviderError::internal(
+                    "expected array in repo listing response",
+                ));
             };
             let entries = arr
                 .iter()
                 .filter_map(|item| {
-                    let name = item.get("name")?.as_str()?;
-                    Some(DirEntry {
-                        name: name.to_string(),
-                        kind: EntryKind::Directory,
-                        size: None,
-                        projected_files: None,
-                    })
+                    item.get("name")
+                        .and_then(|name| name.as_str())
+                        .map(|name| mk_dir(name.to_string()))
                 })
                 .collect();
             ProviderResponse::Done(ActionResult::DirEntries(DirListing {
@@ -372,7 +351,9 @@ pub fn resume_list_first_page(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             let Some(items) = json.get("items").and_then(|v| v.as_array()) else {
-                return err("expected 'items' array in search response");
+                return err(ProviderError::internal(
+                    "expected 'items' array in search response",
+                ));
             };
             let first_page_items: Vec<serde_json::Value> = items.clone();
 
@@ -396,8 +377,8 @@ pub fn resume_list_first_page(
                 .map(|page| api::github_get(&format!("{base}&page={page}")))
                 .collect();
 
-            match with_state(|state| {
-                state.pending.insert(
+            match crate::with_pending(|p| {
+                p.insert(
                     id,
                     Continuation::FetchingRemainingPages {
                         path: path.to_string(),
@@ -406,26 +387,24 @@ pub fn resume_list_first_page(
                 );
             }) {
                 Ok(()) => ProviderResponse::Batch(remaining_fetches),
-                Err(e) => err(&e),
+                Err(e) => err(e),
             }
         }
         Some(FsPath::ActionRuns { owner, repo }) => {
             let Some(runs) = json.get("workflow_runs").and_then(|v| v.as_array()) else {
-                return err("expected 'workflow_runs' array in runs response");
+                return err(ProviderError::internal(
+                    "expected 'workflow_runs' array in runs response",
+                ));
             };
             let entries = runs
                 .iter()
                 .filter_map(|item| {
                     let run_id = item.get("id")?.as_u64()?;
-                    let cache_key = format!("{owner}/{repo}/actions/runs/{run_id}");
+                    let cache_key =
+                        RepoId::new(owner, repo).cache_path(&format!("actions/runs/{run_id}"));
                     let item_bytes = serde_json::to_vec(item).ok()?;
                     let _ = with_state(|state| state.cache.set(cache_key, item_bytes));
-                    Some(DirEntry {
-                        name: run_id.to_string(),
-                        kind: EntryKind::Directory,
-                        size: None,
-                        projected_files: None,
-                    })
+                    Some(mk_dir(run_id.to_string()))
                 })
                 .collect();
             ProviderResponse::Done(ActionResult::DirEntries(DirListing {
@@ -433,7 +412,7 @@ pub fn resume_list_first_page(
                 exhaustive: false,
             }))
         }
-        _ => err("unexpected list path"),
+        _ => err(ProviderError::internal("unexpected list path")),
     }
 }
 
@@ -446,7 +425,11 @@ pub fn resume_list_remaining(
 ) -> ProviderResponse {
     let batch_results = match effect_outcome {
         EffectResult::Batch(results) => results,
-        EffectResult::Single(_) => return err("expected batch result for remaining pages"),
+        EffectResult::Single(_) => {
+            return err(ProviderError::internal(
+                "expected batch result for remaining pages",
+            ));
+        }
     };
 
     let mut all_items = first_page_items;
@@ -517,7 +500,7 @@ pub fn finalize_search_results(path: &str, items: &[serde_json::Value]) -> Provi
         owner, repo, kind, ..
     }) = FsPath::parse(path)
     else {
-        return err("invalid resource filter path");
+        return err(ProviderError::internal("invalid resource filter path"));
     };
     let api_resource = kind.api_path();
 
@@ -525,7 +508,8 @@ pub fn finalize_search_results(path: &str, items: &[serde_json::Value]) -> Provi
         .iter()
         .filter_map(|item| {
             let number = item.get("number")?.as_u64()?;
-            let cache_key = format!("{owner}/{repo}/{api_resource}/{number}");
+            let cache_key =
+                RepoId::new(owner, repo).cache_path(&format!("{api_resource}/{number}"));
             let item_bytes = serde_json::to_vec(item).ok()?;
             let _ = with_state(|state| state.cache.set(cache_key, item_bytes));
             // Build projected files from the search result JSON.
@@ -551,7 +535,7 @@ pub fn finalize_cached_resource_list(
     filter: StateFilter,
 ) -> ProviderResponse {
     let api_resource = kind.api_path();
-    let prefix = format!("{owner}/{repo}/{api_resource}/");
+    let prefix = RepoId::new(owner, repo).cache_path(&format!("{api_resource}/"));
     let keys = with_state(|state| state.cache.keys_with_prefix(&prefix)).unwrap_or_default();
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
@@ -579,12 +563,7 @@ pub fn finalize_cached_resource_list(
         {
             continue;
         }
-        entries.push(DirEntry {
-            name: number.to_string(),
-            kind: EntryKind::Directory,
-            size: None,
-            projected_files: None,
-        });
+        entries.push(mk_dir(number.to_string()));
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     ProviderResponse::Done(ActionResult::DirEntries(DirListing {
@@ -594,7 +573,7 @@ pub fn finalize_cached_resource_list(
 }
 
 pub fn finalize_cached_runs_list(owner: &str, repo: &str) -> ProviderResponse {
-    let prefix = format!("{owner}/{repo}/actions/runs/");
+    let prefix = RepoId::new(owner, repo).cache_path("actions/runs/");
     let keys = with_state(|state| state.cache.keys_with_prefix(&prefix)).unwrap_or_default();
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
@@ -605,12 +584,7 @@ pub fn finalize_cached_runs_list(owner: &str, repo: &str) -> ProviderResponse {
         if run_id.contains('/') || !seen.insert(run_id.to_string()) {
             continue;
         }
-        entries.push(DirEntry {
-            name: run_id.to_string(),
-            kind: EntryKind::Directory,
-            size: None,
-            projected_files: None,
-        });
+        entries.push(mk_dir(run_id.to_string()));
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     ProviderResponse::Done(ActionResult::DirEntries(DirListing {
