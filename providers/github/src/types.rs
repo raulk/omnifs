@@ -166,9 +166,6 @@ impl ResourceKind {
     }
 }
 
-impl StateFilter {
-}
-
 impl ResourceFile {
     pub fn is_valid_for(&self, kind: ResourceKind) -> bool {
         match self {
