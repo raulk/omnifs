@@ -25,21 +25,28 @@ impl DohError {
             }
             Self::DnsResponse(code) => match code {
                 ResponseCode::FormErr => {
-                    ProviderError::invalid_input(format!("DNS response code: {code}"))
+                    ProviderError::invalid_input(dns_code_message(code))
                 }
-                ResponseCode::ServFail => {
-                    ProviderError::network(format!("DNS response code: {code}"), true)
-                }
-                ResponseCode::NXDomain => {
-                    ProviderError::not_found(format!("DNS response code: {code}"))
-                }
-                ResponseCode::Refused => {
-                    ProviderError::denied(format!("DNS response code: {code}"))
-                }
-                _ => ProviderError::internal(format!("DNS response code error ({code})")),
+                ResponseCode::ServFail => ProviderError::network(dns_code_message(code), true),
+                ResponseCode::NXDomain => ProviderError::not_found(dns_code_message(code)),
+                ResponseCode::Refused => ProviderError::denied(dns_code_message(code)),
+                _ => ProviderError::internal(dns_code_error_message(code)),
             },
         }
     }
+}
+
+fn dns_code_message(code: ResponseCode) -> String {
+    let mut message = String::from("DNS response code: ");
+    message.push_str(code.to_string().as_str());
+    message
+}
+
+fn dns_code_error_message(code: ResponseCode) -> String {
+    let mut message = String::from("DNS response code error (");
+    message.push_str(code.to_string().as_str());
+    message.push(')');
+    message
 }
 
 /// Validated `DoH` endpoint URL (always HTTPS).
