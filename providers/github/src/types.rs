@@ -3,43 +3,59 @@
 use core::str::FromStr;
 
 /// Namespace directories within a repository.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
 pub enum Namespace {
+    #[strum(serialize = "_issues")]
     Issues,
+    #[strum(serialize = "_prs")]
     Prs,
+    #[strum(serialize = "_actions")]
     Actions,
+    #[strum(serialize = "_repo")]
     Repo,
 }
 
 /// Resource kind (issues or PRs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
 pub enum ResourceKind {
+    #[strum(serialize = "_issues")]
     Issues,
+    #[strum(serialize = "_prs")]
     Prs,
 }
 
 /// State filter for resources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
 pub enum StateFilter {
+    #[strum(serialize = "_open")]
     Open,
+    #[strum(serialize = "_all")]
     All,
 }
 
 /// File types available under an issue or PR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
 pub enum ResourceFile {
+    #[strum(serialize = "title")]
     Title,
+    #[strum(serialize = "body")]
     Body,
+    #[strum(serialize = "state")]
     State,
+    #[strum(serialize = "user")]
     User,
+    #[strum(serialize = "diff")]
     Diff,
 }
 
 /// File types available under an action run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
 pub enum RunFile {
+    #[strum(serialize = "status")]
     Status,
+    #[strum(serialize = "conclusion")]
     Conclusion,
+    #[strum(serialize = "log")]
     Log,
 }
 
@@ -106,13 +122,7 @@ pub(crate) fn github_owner_cache_prefix(owner: &str) -> String {
 
 impl Namespace {
     pub fn from_dir_name(name: &str) -> Option<Self> {
-        match name {
-            "_issues" => Some(Namespace::Issues),
-            "_prs" => Some(Namespace::Prs),
-            "_actions" => Some(Namespace::Actions),
-            "_repo" => Some(Namespace::Repo),
-            _ => None,
-        }
+        name.parse::<Self>().ok()
     }
 
     pub fn dir_name(&self) -> &'static str {
@@ -165,59 +175,11 @@ impl StateFilter {
     }
 }
 
-impl FromStr for ResourceKind {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "_issues" => Ok(Self::Issues),
-            "_prs" => Ok(Self::Prs),
-            _ => Err(()),
-        }
-    }
-}
-
-impl FromStr for StateFilter {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "_open" => Ok(Self::Open),
-            "_all" => Ok(Self::All),
-            _ => Err(()),
-        }
-    }
-}
-
-impl FromStr for ResourceFile {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "title" => Ok(Self::Title),
-            "body" => Ok(Self::Body),
-            "state" => Ok(Self::State),
-            "user" => Ok(Self::User),
-            "diff" => Ok(Self::Diff),
-            _ => Err(()),
-        }
-    }
-}
-
 impl ResourceFile {
     pub fn is_valid_for(&self, kind: ResourceKind) -> bool {
         match self {
             ResourceFile::Diff => kind == ResourceKind::Prs,
             _ => true,
-        }
-    }
-}
-
-impl FromStr for RunFile {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "status" => Ok(Self::Status),
-            "conclusion" => Ok(Self::Conclusion),
-            "log" => Ok(Self::Log),
-            _ => Err(()),
         }
     }
 }
