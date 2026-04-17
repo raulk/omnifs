@@ -7,7 +7,7 @@ use super::{dispatch_or_err, enter_cache_only, err, get_cached, is_unauthorized}
 use crate::Continuation;
 use crate::api;
 use crate::path::FsPath;
-use crate::types::{RepoPath, ResourceFile, ResourceKind, RunFile, github_owner_cache_prefix};
+use crate::types::{RepoId, ResourceFile, ResourceKind, RunFile, github_owner_cache_prefix};
 use crate::with_state;
 use omnifs_sdk::prelude::*;
 
@@ -23,7 +23,7 @@ pub fn resume_resource(path: &str, result: &SingleEffectResult) -> ProviderRespo
         }) => {
             let api_resource = kind.api_path();
             let cache_key =
-                RepoPath::new(owner, repo).cache_path(&format!("{api_resource}/{number}"));
+                RepoId::new(owner, repo).cache_path(&format!("{api_resource}/{number}"));
 
             // Stale-on-error: serve cached data when the API request fails.
             let Ok(body) = super::extract_http_body(result) else {
@@ -43,7 +43,7 @@ pub fn resume_resource(path: &str, result: &SingleEffectResult) -> ProviderRespo
             file,
         }) => {
             let cache_key =
-                RepoPath::new(owner, repo).cache_path(&format!("actions/runs/{run_id}"));
+                RepoId::new(owner, repo).cache_path(&format!("actions/runs/{run_id}"));
 
             // Stale-on-error: serve cached data when the API request fails.
             let Ok(body) = super::extract_http_body(result) else {
@@ -164,7 +164,7 @@ pub fn resume_validating_resource(
         enter_cache_only();
         if let Some((owner, repo, kind, number)) = resource_info {
             let cache_key =
-                RepoPath::new(owner, repo).cache_path(&format!("{}/{number}", kind.api_path()));
+                RepoId::new(owner, repo).cache_path(&format!("{}/{number}", kind.api_path()));
             let cached = get_cached(&cache_key)
                 .map(|entry| entry.is_some())
                 .unwrap_or(false);
@@ -184,7 +184,7 @@ pub fn resume_validating_resource(
         }
         SingleEffectResult::HttpResponse(resp) => {
             if let Some((owner, repo, kind, number)) = resource_info {
-                let repo_path = RepoPath::new(owner, repo);
+                let repo_path = RepoId::new(owner, repo);
                 let cache_key = repo_path.cache_path(&format!("{}/{number}", kind.api_path()));
                 let _ = with_state(|state| state.cache.set(cache_key, resp.body.clone()));
             }
@@ -229,7 +229,7 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
         enter_cache_only();
         if let Some((owner, repo, number)) = comment_info {
             let cache_key =
-                RepoPath::new(owner, repo).cache_path(&format!("issues/{number}/comments"));
+                RepoId::new(owner, repo).cache_path(&format!("issues/{number}/comments"));
             if let Ok(Some(data)) = get_cached(&cache_key) {
                 return match &fs_path {
                     Some(FsPath::Comments { .. }) => list_cached_comments(&data),
@@ -258,7 +258,7 @@ pub fn resume_comments(path: &str, result: &SingleEffectResult) -> ProviderRespo
         return err(ProviderError::internal("unexpected comments path"));
     };
 
-    let cache_key = RepoPath::new(owner, repo).cache_path(&format!("issues/{number}/comments"));
+    let cache_key = RepoId::new(owner, repo).cache_path(&format!("issues/{number}/comments"));
     let _ = with_state(|state| state.cache.set(cache_key, body.to_vec()));
 
     let json = match api::parse_json(body) {

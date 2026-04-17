@@ -69,12 +69,12 @@ pub struct Repo(String);
 pub struct TreePath(String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RepoPath<'a> {
+pub(crate) struct RepoId<'a> {
     owner: &'a str,
     repo: &'a str,
 }
 
-impl<'a> RepoPath<'a> {
+impl<'a> RepoId<'a> {
     pub(crate) fn new(owner: &'a str, repo: &'a str) -> Self {
         Self { owner, repo }
     }

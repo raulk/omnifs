@@ -6,7 +6,7 @@
 use super::{dispatch_or_err, enter_cache_only, err, is_unauthorized};
 use crate::api;
 use crate::path::FsPath;
-use crate::types::{RepoPath, ResourceKind, StateFilter, github_owner_cache_prefix};
+use crate::types::{RepoId, ResourceKind, StateFilter, github_owner_cache_prefix};
 use crate::with_state;
 use crate::{Continuation, SingleEffect};
 use hashbrown::HashSet;
@@ -401,7 +401,7 @@ pub fn resume_list_first_page(
                 .filter_map(|item| {
                     let run_id = item.get("id")?.as_u64()?;
                     let cache_key =
-                        RepoPath::new(owner, repo).cache_path(&format!("actions/runs/{run_id}"));
+                        RepoId::new(owner, repo).cache_path(&format!("actions/runs/{run_id}"));
                     let item_bytes = serde_json::to_vec(item).ok()?;
                     let _ = with_state(|state| state.cache.set(cache_key, item_bytes));
                     Some(mk_dir(run_id.to_string()))
@@ -509,7 +509,7 @@ pub fn finalize_search_results(path: &str, items: &[serde_json::Value]) -> Provi
         .filter_map(|item| {
             let number = item.get("number")?.as_u64()?;
             let cache_key =
-                RepoPath::new(owner, repo).cache_path(&format!("{api_resource}/{number}"));
+                RepoId::new(owner, repo).cache_path(&format!("{api_resource}/{number}"));
             let item_bytes = serde_json::to_vec(item).ok()?;
             let _ = with_state(|state| state.cache.set(cache_key, item_bytes));
             // Build projected files from the search result JSON.
@@ -535,7 +535,7 @@ pub fn finalize_cached_resource_list(
     filter: StateFilter,
 ) -> ProviderResponse {
     let api_resource = kind.api_path();
-    let prefix = RepoPath::new(owner, repo).cache_path(&format!("{api_resource}/"));
+    let prefix = RepoId::new(owner, repo).cache_path(&format!("{api_resource}/"));
     let keys = with_state(|state| state.cache.keys_with_prefix(&prefix)).unwrap_or_default();
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
@@ -573,7 +573,7 @@ pub fn finalize_cached_resource_list(
 }
 
 pub fn finalize_cached_runs_list(owner: &str, repo: &str) -> ProviderResponse {
-    let prefix = RepoPath::new(owner, repo).cache_path("actions/runs/");
+    let prefix = RepoId::new(owner, repo).cache_path("actions/runs/");
     let keys = with_state(|state| state.cache.keys_with_prefix(&prefix)).unwrap_or_default();
     let mut entries = Vec::new();
     let mut seen = HashSet::new();

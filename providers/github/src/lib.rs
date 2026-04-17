@@ -225,7 +225,7 @@ impl GithubProvider {
         let repo = repo.as_str();
         let _tree_path = tree_path.as_str();
         browse::touch_repo(owner, repo);
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         let clone_url = repo_path.clone_url();
         let cache_key = repo_path.github_cache_key();
         Some(dispatch_or_err(
@@ -250,7 +250,7 @@ impl GithubProvider {
                 if browse::cache_only() {
                     return browse::finalize_cached_runs_list(owner, repo);
                 }
-                let repo_path = RepoPath::new(owner, repo);
+                let repo_path = RepoId::new(owner, repo);
                 let api_path = repo_path.api_path("actions/runs?per_page=30");
                 dispatch_or_err(
                     id,
@@ -293,7 +293,7 @@ impl GithubProvider {
     ) -> Option<ProviderResponse> {
         let owner = owner.as_str();
         let repo = repo.as_str();
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         let run_id_str = run_id.to_string();
         let file_name = match file {
             RunFile::Status => "status",
@@ -356,7 +356,7 @@ impl GithubProvider {
     ) -> Option<ProviderResponse> {
         let owner = owner.as_str();
         let repo = repo.as_str();
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         dir_only_with(
             op,
             filter.as_ref(),
@@ -403,7 +403,7 @@ impl GithubProvider {
         let number_str = number.to_string();
         let ns_name = ns.as_ref();
         let filter_name = filter.as_ref();
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         dir_only_with(
             op,
             number_str.as_str(),
@@ -463,7 +463,7 @@ impl GithubProvider {
         let owner = owner.as_str();
         let repo = repo.as_str();
         let number_str = number.to_string();
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         dir_only_with(
             op,
             "comments",
@@ -510,7 +510,7 @@ impl GithubProvider {
         let number_str = number.to_string();
         let idx_str = idx.to_string();
         let idx_name = idx_str.as_str();
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         file_only_with(
             op,
             idx_name,
@@ -564,7 +564,7 @@ impl GithubProvider {
             ResourceFile::User => "user",
             ResourceFile::Diff => "diff",
         };
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         file_only_with(
             op,
             file_name,
@@ -632,7 +632,7 @@ impl GithubProvider {
         ns: Namespace,
     ) -> Option<ProviderResponse> {
         let ns_name = ns.as_ref();
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         dir_only_with(
             op,
             ns_name,
@@ -731,7 +731,7 @@ impl GithubProvider {
         )
     }
     fn lookup_repo(id: u64, owner: &str, repo: &str) -> ProviderResponse {
-        let repo_path = RepoPath::new(owner, repo);
+        let repo_path = RepoId::new(owner, repo);
         if browse::cache_only() {
             return dispatch_or_err(
                 id,
