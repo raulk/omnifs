@@ -7,7 +7,6 @@ use omnifs_sdk::prelude::*;
 
 mod api;
 mod browse;
-mod cache;
 pub(crate) mod path;
 pub(crate) mod types;
 
@@ -24,7 +23,7 @@ enum OwnerKind {
 pub struct Config {}
 
 pub struct State {
-    cache: cache::Cache,
+    cache: Cache,
     negative_owners: hashbrown::HashMap<String, u64>,
     owner_kinds: hashbrown::HashMap<String, OwnerKind>,
     owner_repos_cache: hashbrown::HashMap<String, (u64, Vec<String>)>,
@@ -93,7 +92,7 @@ pub enum CachedRepoListMode {
 impl GithubProvider {
     fn init(_config: Config) -> (State, ProviderInfo) {
         let mut state = State {
-            cache: cache::Cache::new(),
+            cache: Cache::new(128),
             negative_owners: hashbrown::HashMap::new(),
             owner_kinds: hashbrown::HashMap::new(),
             owner_repos_cache: hashbrown::HashMap::new(),

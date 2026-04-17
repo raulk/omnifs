@@ -1,27 +1,20 @@
-//! Tick-based LRU cache for provider data.
-//!
-//! Entries are evicted by `inserted_at` tick when capacity is reached.
-//! Extracted from the GitHub provider's cache as a generic, reusable type.
+//! LRU cache for provider API payloads.
 
-use hashbrown::HashMap;
+use std::num::NonZeroUsize;
 
-struct CachedEntry {
-    data: Vec<u8>,
-    inserted_at: u64,
-}
+use lru::LruCache;
 
 pub struct Cache {
-    entries: HashMap<String, CachedEntry>,
+    entries: LruCache<String, Vec<u8>>,
     tick: u64,
-    max_entries: usize,
 }
 
 impl Cache {
     pub fn new(max_entries: usize) -> Self {
+        let max_entries = NonZeroUsize::new(max_entries.max(1)).unwrap();
         Self {
-            entries: HashMap::new(),
+            entries: LruCache::new(max_entries),
             tick: 0,
-            max_entries,
         }
     }
 
@@ -33,42 +26,35 @@ impl Cache {
         self.tick
     }
 
-    pub fn get(&self, key: &str) -> Option<&[u8]> {
-        self.entries.get(key).map(|entry| entry.data.as_slice())
+    pub fn get(&mut self, key: &str) -> Option<&[u8]> {
+        self.entries.get(key).map(|entry| entry.as_slice())
     }
 
     pub fn set(&mut self, key: String, data: Vec<u8>) {
-        self.entries.remove(&key);
-        let oldest_key = (self.entries.len() >= self.max_entries).then(|| {
-            self.entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.inserted_at)
-                .map(|(k, _)| k.clone())
-        });
-
-        if let Some(oldest_key) = oldest_key.flatten() {
-            self.entries.remove(&oldest_key);
-        }
-        self.entries.insert(
-            key,
-            CachedEntry {
-                data,
-                inserted_at: self.tick,
-            },
-        );
+        self.entries.put(key, data);
     }
 
     pub fn remove(&mut self, key: &str) {
-        self.entries.remove(key);
+        self.entries.pop(key);
     }
 
     pub fn remove_prefix(&mut self, prefix: &str) {
-        self.entries.retain(|key, _| !key.starts_with(prefix));
+        let keys: Vec<String> = self
+            .entries
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .filter(|key| key.starts_with(prefix))
+            .map(std::borrow::ToOwned::to_owned)
+            .collect();
+        for key in keys {
+            self.entries.pop(&key);
+        }
     }
 
-    pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+    pub fn keys_with_prefix(&mut self, prefix: &str) -> Vec<String> {
         self.entries
-            .keys()
+            .iter()
+            .map(|(key, _)| key)
             .filter(|key| key.starts_with(prefix))
             .cloned()
             .collect()

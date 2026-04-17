@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 omnifs-sdk-macros = { path = "../omnifs-sdk-macros" }
 wit-bindgen = "0.41"
+lru = "0.16"
 hashbrown = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
