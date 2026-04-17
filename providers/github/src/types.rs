@@ -3,7 +3,7 @@
 use core::str::FromStr;
 
 /// Namespace directories within a repository.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::AsRefStr)]
 pub enum Namespace {
     #[strum(serialize = "_issues")]
     Issues,
@@ -16,7 +16,7 @@ pub enum Namespace {
 }
 
 /// Resource kind (issues or PRs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::AsRefStr)]
 pub enum ResourceKind {
     #[strum(serialize = "_issues")]
     Issues,
@@ -124,25 +124,9 @@ impl Namespace {
     pub fn from_dir_name(name: &str) -> Option<Self> {
         name.parse::<Self>().ok()
     }
-
-    pub fn dir_name(&self) -> &'static str {
-        match self {
-            Namespace::Issues => "_issues",
-            Namespace::Prs => "_prs",
-            Namespace::Actions => "_actions",
-            Namespace::Repo => "_repo",
-        }
-    }
 }
 
 impl ResourceKind {
-    pub fn dir_name(&self) -> &'static str {
-        match self {
-            ResourceKind::Issues => "_issues",
-            ResourceKind::Prs => "_prs",
-        }
-    }
-
     pub fn from_ns(ns: Namespace) -> Option<Self> {
         match ns {
             Namespace::Issues => Some(ResourceKind::Issues),

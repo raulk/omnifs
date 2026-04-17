@@ -173,10 +173,10 @@ impl GithubProvider {
                 Some(ProviderResponse::Done(ActionResult::DirEntries(
                     DirListing {
                         entries: vec![
-                            mk_dir(Namespace::Repo.dir_name()),
-                            mk_dir(Namespace::Issues.dir_name()),
-                            mk_dir(Namespace::Prs.dir_name()),
-                            mk_dir(Namespace::Actions.dir_name()),
+                            mk_dir(Namespace::Repo.as_ref()),
+                            mk_dir(Namespace::Issues.as_ref()),
+                            mk_dir(Namespace::Prs.as_ref()),
+                            mk_dir(Namespace::Actions.as_ref()),
                         ],
                         exhaustive: true,
                     },
@@ -372,7 +372,7 @@ impl GithubProvider {
                 };
                 let query = format!("repo:{owner}/{repo}+is:{resource_kind}{state_clause}");
                 let filter_name = filter.as_ref();
-                let ns_name = ns.dir_name();
+                let ns_name = ns.as_ref();
                 let api_path =
                     format!("/search/issues?q={query}&sort=created&order=desc&per_page=100");
                 let path = repo_path.path(&format!("{ns_name}/{filter_name}"));
@@ -401,7 +401,7 @@ impl GithubProvider {
         let owner = owner.as_str();
         let repo = repo.as_str();
         let number_str = number.to_string();
-        let ns_name = ns.dir_name();
+        let ns_name = ns.as_ref();
         let filter_name = filter.as_ref();
         let repo_path = RepoPath::new(owner, repo);
         dir_only_with(
@@ -479,7 +479,7 @@ impl GithubProvider {
                         exhaustive: false,
                     }));
                 }
-                let ns_name = ns.dir_name();
+                let ns_name = ns.as_ref();
                 let filter_name = filter.as_ref();
                 let api_path =
                     repo_path.api_path(&format!("issues/{number_str}/comments?per_page=100"));
@@ -523,7 +523,7 @@ impl GithubProvider {
                 if browse::cache_only() {
                     return browse::err(ProviderError::not_found("not found in cache"));
                 }
-                let ns_name = ns.dir_name();
+                let ns_name = ns.as_ref();
                 let filter_name = filter.as_ref();
                 let api_path =
                     repo_path.api_path(&format!("issues/{number_str}/comments?per_page=100"));
@@ -571,7 +571,7 @@ impl GithubProvider {
             |id| {
                 browse::touch_repo(owner, repo);
                 let api_resource = ns.api_path();
-                let ns_name = ns.dir_name();
+                let ns_name = ns.as_ref();
                 let filter_name = filter.as_ref();
 
                 // Diff requires separate fetch with different Accept header
@@ -631,7 +631,7 @@ impl GithubProvider {
         repo: &str,
         ns: Namespace,
     ) -> Option<ProviderResponse> {
-        let ns_name = ns.dir_name();
+        let ns_name = ns.as_ref();
         let repo_path = RepoPath::new(owner, repo);
         dir_only_with(
             op,
