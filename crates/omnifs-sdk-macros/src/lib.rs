@@ -30,12 +30,7 @@ enum Segment {
 }
 
 fn is_valid_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    syn::parse_str::<Ident>(s).is_ok()
 }
 
 fn parse_template(template: &str) -> Result<Vec<Segment>, String> {
@@ -754,14 +749,16 @@ fn provider_impl(input: ItemImpl) -> Result<TokenStream2, syn::Error> {
 
     // Check for duplicate path templates
     let mut seen_templates = std::collections::HashSet::new();
-    for route in &classified.routes {
-        if !seen_templates.insert(&route.template) {
-            return Err(syn::Error::new(
+    classified.routes.iter().try_for_each(|route| {
+        if seen_templates.insert(&route.template) {
+            Ok(())
+        } else {
+            Err(syn::Error::new(
                 route.func.sig.span(),
                 format!("duplicate path template: {}", route.template),
-            ));
+            ))
         }
-    }
+    })?;
 
     let state_type = &init.state_type;
     let cont_type = &resume_method.continuation_type;
