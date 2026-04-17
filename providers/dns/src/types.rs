@@ -80,11 +80,9 @@ impl FromStr for DomainName {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.contains('.') && !s.contains(char::is_whitespace) && s.len() <= 253 {
-            Ok(Self(s.to_string()))
-        } else {
-            Err(())
-        }
+        (s.contains('.') && !s.contains(char::is_whitespace) && s.len() <= 253)
+            .then_some(Self(s.to_string()))
+            .ok_or(())
     }
 }
 

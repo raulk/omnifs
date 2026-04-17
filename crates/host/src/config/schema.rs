@@ -20,18 +20,16 @@ pub fn validate_config(schema_json: &str, config: &serde_json::Value) -> Result<
         .map(|error| format_validation_error(&error))
         .collect();
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(SchemaError::Validation(errors.join("; ")))
-    }
+    errors
+        .is_empty()
+        .then_some(())
+        .ok_or_else(|| SchemaError::Validation(errors.join("; ")))
 }
 
 fn format_validation_error(error: &jsonschema::ValidationError<'_>) -> String {
     let path = error.instance_path().to_string();
-    if path.is_empty() {
-        error.to_string()
-    } else {
-        format!("{error} at {path}")
-    }
+    path
+        .is_empty()
+        .then_some(error.to_string())
+        .unwrap_or_else(|| format!("{error} at {path}"))
 }

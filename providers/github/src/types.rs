@@ -226,11 +226,7 @@ impl FromStr for Owner {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if is_safe_segment(s) {
-            Ok(Self(s.to_string()))
-        } else {
-            Err(())
-        }
+        is_safe_segment(s).then_some(Self(s.to_string())).ok_or(())
     }
 }
 
@@ -238,11 +234,7 @@ impl FromStr for Repo {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if is_safe_segment(s) {
-            Ok(Self(s.to_string()))
-        } else {
-            Err(())
-        }
+        is_safe_segment(s).then_some(Self(s.to_string())).ok_or(())
     }
 }
 
@@ -262,11 +254,7 @@ impl FromStr for TreePath {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if is_safe_tree_path(s) {
-            Ok(Self(s.to_string()))
-        } else {
-            Err(())
-        }
+        is_safe_tree_path(s).then_some(Self(s.to_string())).ok_or(())
     }
 }
 
