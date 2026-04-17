@@ -20,19 +20,21 @@ enum DohError {
 impl DohError {
     fn into_provider_error(self) -> ProviderError {
         match self {
-            Self::Parse(message) => ProviderError::invalid_input(format!("invalid DoH DNS message: {message}")),
+            Self::Parse(message) => {
+                ProviderError::invalid_input(format!("invalid DoH DNS message: {message}"))
+            }
             Self::DnsResponse(code) => match code {
                 ResponseCode::FormErr => {
-                    ProviderError::invalid_input("DNS FORMERR (rcode FORMERR)".to_string())
+                    ProviderError::invalid_input(format!("DNS response code: {code}"))
                 }
                 ResponseCode::ServFail => {
-                    ProviderError::network("DNS SERVFAIL (rcode SERVFAIL)".to_string(), true)
+                    ProviderError::network(format!("DNS response code: {code}"), true)
                 }
                 ResponseCode::NXDomain => {
-                    ProviderError::not_found("DNS NXDOMAIN (rcode NXDOMAIN)".to_string())
+                    ProviderError::not_found(format!("DNS response code: {code}"))
                 }
                 ResponseCode::Refused => {
-                    ProviderError::denied("DNS REFUSED (rcode REFUSED)".to_string())
+                    ProviderError::denied(format!("DNS response code: {code}"))
                 }
                 _ => ProviderError::internal(format!("DNS response code error ({code})")),
             },
