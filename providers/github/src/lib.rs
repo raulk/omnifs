@@ -359,7 +359,7 @@ impl GithubProvider {
         let repo_path = RepoPath::new(owner, repo);
         dir_only_with(
             op,
-            filter.dir_name(),
+            filter.as_ref(),
             |id| {
                 browse::touch_repo(owner, repo);
                 if browse::cache_only() {
@@ -371,7 +371,7 @@ impl GithubProvider {
                     StateFilter::All => "",
                 };
                 let query = format!("repo:{owner}/{repo}+is:{resource_kind}{state_clause}");
-                let filter_name = filter.dir_name();
+                let filter_name = filter.as_ref();
                 let ns_name = ns.dir_name();
                 let api_path =
                     format!("/search/issues?q={query}&sort=created&order=desc&per_page=100");
@@ -402,7 +402,7 @@ impl GithubProvider {
         let repo = repo.as_str();
         let number_str = number.to_string();
         let ns_name = ns.dir_name();
-        let filter_name = filter.dir_name();
+        let filter_name = filter.as_ref();
         let repo_path = RepoPath::new(owner, repo);
         dir_only_with(
             op,
@@ -480,7 +480,7 @@ impl GithubProvider {
                     }));
                 }
                 let ns_name = ns.dir_name();
-                let filter_name = filter.dir_name();
+                let filter_name = filter.as_ref();
                 let api_path =
                     repo_path.api_path(&format!("issues/{number_str}/comments?per_page=100"));
                 let path =
@@ -524,7 +524,7 @@ impl GithubProvider {
                     return browse::err(ProviderError::not_found("not found in cache"));
                 }
                 let ns_name = ns.dir_name();
-                let filter_name = filter.dir_name();
+                let filter_name = filter.as_ref();
                 let api_path =
                     repo_path.api_path(&format!("issues/{number_str}/comments?per_page=100"));
                 let path = repo_path.path(&format!(
@@ -572,7 +572,7 @@ impl GithubProvider {
                 browse::touch_repo(owner, repo);
                 let api_resource = ns.api_path();
                 let ns_name = ns.dir_name();
-                let filter_name = filter.dir_name();
+                let filter_name = filter.as_ref();
 
                 // Diff requires separate fetch with different Accept header
                 if file == ResourceFile::Diff {

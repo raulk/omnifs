@@ -25,7 +25,7 @@ pub enum ResourceKind {
 }
 
 /// State filter for resources.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, strum::AsRefStr)]
 pub enum StateFilter {
     #[strum(serialize = "_open")]
     Open,
@@ -167,12 +167,6 @@ impl ResourceKind {
 }
 
 impl StateFilter {
-    pub fn dir_name(&self) -> &'static str {
-        match self {
-            StateFilter::Open => "_open",
-            StateFilter::All => "_all",
-        }
-    }
 }
 
 impl ResourceFile {
