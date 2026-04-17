@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::str::FromStr;
 
 #[derive(
     Debug,
@@ -72,12 +73,48 @@ impl RecordType {
     }
 }
 
-pub(crate) fn is_domain_like(s: &str) -> bool {
-    s.contains('.') && !s.contains(char::is_whitespace) && s.len() <= 253
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DomainName(String);
+
+impl FromStr for DomainName {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains('.') && !s.contains(char::is_whitespace) && s.len() <= 253 {
+            Ok(Self(s.to_string()))
+        } else {
+            Err(())
+        }
+    }
 }
 
-pub(crate) fn is_ip_addr(s: &str) -> bool {
-    s.parse::<IpAddr>().is_ok()
+impl std::fmt::Display for DomainName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl AsRef<str> for DomainName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Segment {
+    Ip(IpAddr),
+    Domain(DomainName),
+}
+
+impl FromStr for Segment {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(ip) = s.parse::<IpAddr>() {
+            return Ok(Self::Ip(ip));
+        }
+        s.parse::<DomainName>().map(Self::Domain).map_err(|_| ())
+    }
 }
 
 #[cfg(test)]

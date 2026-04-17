@@ -60,12 +60,14 @@ pub fn timer_tick(id: u64) -> ProviderResponse {
         );
     }) {
         Ok(()) => ProviderResponse::Batch(effects),
-        Err(e) => err(&e),
+        Err(e) => err(ProviderError::internal(e)),
     }
 }
 
 pub fn event_etag(repo: &str) -> Option<String> {
-    with_state(|state| state.event_etags.get(repo).cloned()).unwrap_or(None)
+    with_state(|state| state.event_etags.get(repo).cloned())
+        .ok()
+        .flatten()
 }
 
 pub fn events_fetch(owner: &str, repo: &str, etag: Option<String>) -> SingleEffect {
@@ -231,15 +233,14 @@ pub fn resume_diff(path: &str, result: &SingleEffectResult) -> ProviderResponse 
             if resp.status == 401 {
                 enter_cache_only();
                 if let Some(cache_key) = &cache_key
-                    && let Ok(Some(data)) =
-                        with_state(|state| state.cache.get(cache_key).map(<[u8]>::to_vec))
+                    && let Ok(Some(data)) = super::get_cached(cache_key)
                 {
                     return ProviderResponse::Done(ActionResult::FileContent(data));
                 }
-                return err("diff not found in cache");
+                return err(ProviderError::not_found("diff not found in cache"));
             }
             if resp.status >= 400 {
-                return err(&format!("diff API error: {}", resp.status));
+                return err(ProviderError::from_http_status(resp.status));
             }
             let content = truncate_content(resp.body.clone());
             if let Some(cache_key) = cache_key {
@@ -247,8 +248,8 @@ pub fn resume_diff(path: &str, result: &SingleEffectResult) -> ProviderResponse 
             }
             ProviderResponse::Done(ActionResult::FileContent(content))
         }
-        SingleEffectResult::EffectError(e) => err(&format!("diff fetch failed: {}", e.message)),
-        _ => err("unexpected result"),
+        SingleEffectResult::EffectError(e) => err(ProviderError::from_effect_error(e)),
+        _ => err(ProviderError::internal("unexpected result")),
     }
 }
 
@@ -267,22 +268,21 @@ pub fn resume_run_log(path: &str, result: &SingleEffectResult) -> ProviderRespon
             if resp.status == 401 {
                 enter_cache_only();
                 if let Some(cache_key) = &log_cache_key
-                    && let Ok(Some(data)) =
-                        with_state(|state| state.cache.get(cache_key).map(<[u8]>::to_vec))
+                    && let Ok(Some(data)) = super::get_cached(cache_key)
                 {
                     return ProviderResponse::Done(ActionResult::FileContent(data));
                 }
-                return err("log not found in cache");
+                return err(ProviderError::not_found("log not found in cache"));
             }
             if resp.status >= 400 {
-                return err(&format!("log API error: {}", resp.status));
+                return err(ProviderError::from_http_status(resp.status));
             }
             &resp.body
         }
         SingleEffectResult::EffectError(e) => {
-            return err(&format!("log fetch failed: {}", e.message));
+            return err(ProviderError::from_effect_error(e));
         }
-        _ => return err("unexpected result"),
+        _ => return err(ProviderError::internal("unexpected result")),
     };
 
     let content = unzip_logs(body);

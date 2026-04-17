@@ -15,6 +15,7 @@ wit_bindgen::generate!({
 });
 
 pub mod cache;
+pub mod error;
 pub mod helpers;
 pub mod http;
 pub mod prelude;

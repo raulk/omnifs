@@ -41,7 +41,7 @@ fn lookup_payload_positive_round_trip() {
         kind: EntryKindCache::File,
         size: 42,
     };
-    let bytes = payload.serialize();
+    let bytes = payload.serialize().unwrap();
     let decoded = LookupPayload::deserialize(&bytes).unwrap();
     assert!(matches!(
         decoded,
@@ -54,7 +54,7 @@ fn lookup_payload_positive_round_trip() {
 
 #[test]
 fn lookup_payload_negative_round_trip() {
-    let bytes = LookupPayload::Negative.serialize();
+    let bytes = LookupPayload::Negative.serialize().unwrap();
     let decoded = LookupPayload::deserialize(&bytes).unwrap();
     assert!(matches!(decoded, LookupPayload::Negative));
 }
@@ -65,7 +65,7 @@ fn attr_payload_round_trip() {
         kind: EntryKindCache::Directory,
         size: 0,
     };
-    let bytes = payload.serialize();
+    let bytes = payload.serialize().unwrap();
     let decoded = AttrPayload::deserialize(&bytes).unwrap();
     assert_eq!(decoded.kind, EntryKindCache::Directory);
     assert_eq!(decoded.size, 0);
@@ -88,7 +88,7 @@ fn dirents_payload_round_trip() {
         ],
         exhaustive: true,
     };
-    let bytes = payload.serialize();
+    let bytes = payload.serialize().unwrap();
     let decoded = DirentsPayload::deserialize(&bytes).unwrap();
     assert_eq!(decoded.entries.len(), 2);
     assert_eq!(decoded.entries[0].name, "title");

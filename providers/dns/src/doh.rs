@@ -249,19 +249,25 @@ fn default_ttl() -> u64 {
     300
 }
 
-pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), String> {
-    let resp: DohResponse =
-        serde_json::from_slice(body).map_err(|e| format!("invalid DoH JSON: {e}"))?;
+pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), ProviderError> {
+    let resp: DohResponse = serde_json::from_slice(body)
+        .map_err(|e| ProviderError::invalid_input(format!("invalid DoH JSON: {e}")))?;
 
     if resp.status != 0 {
-        let name = match resp.status {
+        let _name = match resp.status {
             1 => "FORMERR",
             2 => "SERVFAIL",
             3 => "NXDOMAIN",
             5 => "REFUSED",
             _ => "ERROR",
         };
-        return Err(format!("DNS {name} (status {})", resp.status));
+        return Err(match resp.status {
+            1 => ProviderError::invalid_input(format!("DNS FORMERR (status {})", resp.status)),
+            2 => ProviderError::network(format!("DNS SERVFAIL (status {})", resp.status), true),
+            3 => ProviderError::not_found(format!("DNS NXDOMAIN (status {})", resp.status)),
+            5 => ProviderError::denied(format!("DNS REFUSED (status {})", resp.status)),
+            _ => ProviderError::internal(format!("DNS ERROR (status {})", resp.status)),
+        });
     }
 
     let mut min_ttl = u64::MAX;
@@ -284,10 +290,10 @@ pub(crate) fn reverse_query(
     config: &ResolverConfig,
     resolver: Option<&str>,
     ip: &str,
-) -> Result<SingleEffect, String> {
+) -> Result<SingleEffect, ProviderError> {
     let addr = ip
         .parse::<IpAddr>()
-        .map_err(|_| format!("invalid IP address: {ip}"))?;
+        .map_err(|_| ProviderError::invalid_input(format!("invalid IP address: {ip}")))?;
     let ptr_domain = match addr {
         IpAddr::V4(addr) => ip_to_in_addr_arpa(addr),
         IpAddr::V6(addr) => ip_to_ip6_arpa(addr),
@@ -404,11 +410,11 @@ mod tests {
         let cfg = default_config();
         assert!(matches!(
             reverse_query(&cfg, None, "1:2:3:4:5:6:7:8:9"),
-            Err(err) if err.contains("invalid IP address")
+            Err(err) if format!("{err}").contains("invalid IP address")
         ));
         assert!(matches!(
             reverse_query(&cfg, None, "999.184.216.34"),
-            Err(err) if err.contains("invalid IP address")
+            Err(err) if format!("{err}").contains("invalid IP address")
         ));
     }
 
@@ -431,7 +437,7 @@ mod tests {
     #[test]
     fn parse_nxdomain() {
         let err = parse_response(br#"{"Status": 3}"#).unwrap_err();
-        assert!(err.contains("NXDOMAIN"));
+        assert!(err.to_string().contains("NXDOMAIN"));
     }
 
     #[test]

@@ -62,6 +62,12 @@ fn make_runtime(config_json: &str) -> RuntimeHarness {
     }
 }
 
+fn make_initialized_runtime(config_json: &str) -> RuntimeHarness {
+    let runtime = make_runtime(config_json);
+    runtime.runtime.initialize().unwrap();
+    runtime
+}
+
 #[test]
 fn dns_provider_exposes_declared_config_schema() {
     let harness = make_runtime(
@@ -97,7 +103,7 @@ fn dns_provider_exposes_declared_config_schema() {
 
 #[tokio::test]
 async fn dns_provider_routes_static_and_dynamic_paths() {
-    let harness = make_runtime(
+    let harness = make_initialized_runtime(
         r#"
         {
             "plugin": "omnifs_provider_dns.wasm",
@@ -108,7 +114,6 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
         }
     "#,
     );
-    harness.runtime.initialize().unwrap();
 
     let lookup = harness
         .runtime
@@ -145,7 +150,7 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
 
 #[tokio::test]
 async fn github_provider_routes_namespace_and_numeric_paths() {
-    let harness = make_runtime(
+    let harness = make_initialized_runtime(
         r#"
         {
             "plugin": "omnifs_provider_github.wasm",
@@ -156,7 +161,6 @@ async fn github_provider_routes_namespace_and_numeric_paths() {
         }
     "#,
     );
-    harness.runtime.initialize().unwrap();
 
     let repo_listing = harness
         .runtime
@@ -165,12 +169,13 @@ async fn github_provider_routes_namespace_and_numeric_paths() {
         .unwrap();
     match repo_listing {
         ActionResult::DirEntries(listing) => {
-            let names: Vec<&str> = listing
+            let mut names: Vec<&str> = listing
                 .entries
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, vec!["_repo", "_issues", "_prs", "_actions"]);
+            names.sort_unstable();
+            assert_eq!(names, vec!["_actions", "_issues", "_prs", "_repo"]);
         }
         other => panic!("expected repo namespace listing, got {other:?}"),
     }
@@ -200,7 +205,9 @@ async fn github_provider_routes_namespace_and_numeric_paths() {
                 .iter()
                 .map(|entry| entry.name.as_str())
                 .collect();
-            assert_eq!(names, vec!["status", "conclusion", "log"]);
+            let mut names = names;
+            names.sort_unstable();
+            assert_eq!(names, vec!["conclusion", "log", "status"]);
             assert!(
                 listing
                     .entries

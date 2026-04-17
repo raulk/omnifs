@@ -12,7 +12,7 @@ pub fn resume_open_repo_disown(_id: u64, result: &SingleEffectResult) -> Provide
         SingleEffectResult::GitRepoOpened(info) => {
             ProviderResponse::Done(ActionResult::DisownedTree(info.tree))
         }
-        SingleEffectResult::EffectError(e) => err(&format!("git open failed: {}", e.message)),
-        _ => err("unexpected result"),
+        SingleEffectResult::EffectError(e) => err(ProviderError::from_effect_error(e)),
+        _ => err(ProviderError::internal("unexpected result")),
     }
 }

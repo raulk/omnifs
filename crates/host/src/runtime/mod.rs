@@ -374,15 +374,13 @@ impl EffectRuntime {
             entries: dirent_records,
             exhaustive,
         };
-        batch.push((
-            parent_path.to_string(),
-            RecordKind::Dirents,
-            CacheRecord::new(
+        if let Some(payload) = dirents_payload.serialize() {
+            batch.push((
+                parent_path.to_string(),
                 RecordKind::Dirents,
-                ttl::DIRENTS,
-                dirents_payload.serialize(),
-            ),
-        ));
+                CacheRecord::new(RecordKind::Dirents, ttl::DIRENTS, payload),
+            ));
+        }
 
         for entry in entries {
             let child_path = if parent_path.is_empty() {
@@ -402,22 +400,26 @@ impl EffectRuntime {
                 kind: kind_cache,
                 size,
             };
-            batch.push((
-                child_path.clone(),
-                RecordKind::Lookup,
-                CacheRecord::new(RecordKind::Lookup, ttl::LOOKUP_POSITIVE, lookup.serialize()),
-            ));
+            if let Some(payload) = lookup.serialize() {
+                batch.push((
+                    child_path.clone(),
+                    RecordKind::Lookup,
+                    CacheRecord::new(RecordKind::Lookup, ttl::LOOKUP_POSITIVE, payload),
+                ));
+            }
 
             // Cache attr record for child.
             let attr = AttrPayload {
                 kind: kind_cache,
                 size,
             };
-            batch.push((
-                child_path.clone(),
-                RecordKind::Attr,
-                CacheRecord::new(RecordKind::Attr, ttl::ATTR, attr.serialize()),
-            ));
+            if let Some(payload) = attr.serialize() {
+                batch.push((
+                    child_path.clone(),
+                    RecordKind::Attr,
+                    CacheRecord::new(RecordKind::Attr, ttl::ATTR, payload),
+                ));
+            }
 
             // Cache projected files.
             if let Some(ref projected) = entry.projected_files {
@@ -437,26 +439,26 @@ impl EffectRuntime {
                         kind: EntryKindCache::File,
                         size: file_size,
                     };
-                    batch.push((
-                        file_path.clone(),
-                        RecordKind::Lookup,
-                        CacheRecord::new(
+                    if let Some(payload) = pf_lookup.serialize() {
+                        batch.push((
+                            file_path.clone(),
                             RecordKind::Lookup,
-                            ttl::LOOKUP_POSITIVE,
-                            pf_lookup.serialize(),
-                        ),
-                    ));
+                            CacheRecord::new(RecordKind::Lookup, ttl::LOOKUP_POSITIVE, payload),
+                        ));
+                    }
 
                     // Attr record for the projected file.
                     let pf_attr = AttrPayload {
                         kind: EntryKindCache::File,
                         size: file_size,
                     };
-                    batch.push((
-                        file_path,
-                        RecordKind::Attr,
-                        CacheRecord::new(RecordKind::Attr, ttl::ATTR, pf_attr.serialize()),
-                    ));
+                    if let Some(payload) = pf_attr.serialize() {
+                        batch.push((
+                            file_path,
+                            RecordKind::Attr,
+                            CacheRecord::new(RecordKind::Attr, ttl::ATTR, payload),
+                        ));
+                    }
                 }
             }
         }
@@ -653,12 +655,11 @@ fn validate_instance_config(schema_json: Option<&str>, config: &InstanceConfig) 
         return;
     };
 
-    let config_value = config
-        .config_raw
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
+    let empty_config = serde_json::Value::Object(serde_json::Map::new());
+    let config_value = config.config_raw.as_ref().unwrap_or(&empty_config);
+    let result = schema::validate_config(schema_json, config_value);
 
-    if let Err(e) = schema::validate_config(schema_json, &config_value) {
+    if let Err(e) = result {
         tracing::warn!("config validation: {e}");
     }
 }

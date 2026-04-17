@@ -81,6 +81,12 @@ interface types {
         batch(list<single-effect-result>),
     }
 
+    record provider-error {
+        kind: error-kind,
+        message: string,
+        retryable: bool,
+    }
+
     // --- Action results (terminal) ---
 
     variant action-result {
@@ -95,6 +101,7 @@ interface types {
         provider-initialized(provider-info),
         disowned-tree(tree-ref),
         ok,
+        provider-err(provider-error),
         err(string),
     }
 

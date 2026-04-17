@@ -2,8 +2,12 @@
 
 pub use crate::Op;
 pub use crate::cache::Cache;
-pub use crate::helpers::{dir_entry, err, file_entry, mk_dir, mk_file};
-pub use crate::http::extract_http_body;
+pub use crate::error::{ProviderError, ProviderErrorKind};
+pub use crate::helpers::{
+    dir_entry, dir_only, dir_only_no_read, dir_only_with, err, file_entry, file_only,
+    file_only_with, mk_dir, mk_file,
+};
+pub use crate::http::{extract_effect_body, extract_http_body};
 
 // Proc macros (invoked as #[omnifs_sdk::provider] and #[route("...")])
 pub use omnifs_sdk_macros::{config, provider, route};

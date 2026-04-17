@@ -4,7 +4,7 @@ mod browse;
 mod doh;
 pub(crate) mod types;
 
-use types::{RecordType, is_domain_like, is_ip_addr};
+use types::{DomainName, RecordType, Segment};
 
 pub(crate) struct State {
     pub resolvers: doh::ResolverConfig,
@@ -31,7 +31,7 @@ struct Config {
 }
 
 fn default_resolver_name() -> String {
-    "cloudflare".to_string()
+    String::from("cloudflare")
 }
 
 #[omnifs_sdk::config]
@@ -73,8 +73,6 @@ impl DnsProvider {
         browse::resume(id, cont, outcome)
     }
 
-    // --- Routes ---
-
     #[route("/")]
     fn root(op: Op) -> Option<ProviderResponse> {
         match op {
@@ -91,122 +89,92 @@ impl DnsProvider {
                     },
                 )))
             }
-            Op::Read(_) => Some(err("not a file")),
+            Op::Read(_) => Some(err(ProviderError::invalid_input("not a file"))),
         }
     }
 
     #[allow(clippy::unnecessary_wraps)]
     #[route("/_resolvers")]
     fn resolvers_file(op: Op) -> Option<ProviderResponse> {
-        match op {
-            Op::Lookup(_) => Some(file_entry("_resolvers")),
-            Op::Read(_) => Some(browse::resolvers_content()),
-            Op::List(_) => Some(err("not a directory")),
-        }
+        file_only(op, "_resolvers", |_| browse::resolvers_content())
     }
 
     #[allow(clippy::unnecessary_wraps)]
     #[route("/_reverse")]
     fn reverse_root(op: Op) -> Option<ProviderResponse> {
-        match op {
-            Op::Lookup(_) => Some(dir_entry("_reverse")),
-            Op::List(_) => Some(ProviderResponse::Done(ActionResult::DirEntries(
-                DirListing {
-                    entries: vec![],
-                    exhaustive: false,
-                },
-            ))),
-            Op::Read(_) => Some(err("not a file")),
-        }
+        dir_only(op, "_reverse", |_| {
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![],
+                exhaustive: false,
+            }))
+        })
     }
 
     #[allow(clippy::unnecessary_wraps)]
     #[route("/_reverse/{ip}")]
     fn reverse_ip(op: Op, ip: &str) -> Option<ProviderResponse> {
-        match op {
-            Op::Lookup(_) => Some(file_entry(ip)),
-            Op::Read(id) => Some(Self::read_reverse_ip(id, None, ip)),
-            Op::List(_) => Some(err("not a directory")),
-        }
+        file_only(op, ip, |id| Self::read_reverse_ip(id, None, ip))
     }
 
-    /// Single segment: could be @resolver, IP address, or domain.
+    #[allow(clippy::unnecessary_wraps)]
+    #[route("/@{segment}")]
+    fn resolver_root(op: Op, segment: &str) -> Option<ProviderResponse> {
+        let segment = format!("@{segment}");
+
+        dir_only(op, segment, |_| {
+            ProviderResponse::Done(ActionResult::DirEntries(DirListing {
+                entries: vec![],
+                exhaustive: false,
+            }))
+        })
+    }
+
     #[route("/{segment}")]
-    fn single_segment(op: Op, segment: &str) -> Option<ProviderResponse> {
-        if let Some(resolver) = segment.strip_prefix('@') {
-            // @resolver directory
-            let _ = resolver;
-            return match op {
-                Op::Lookup(_) => Some(dir_entry(segment)),
-                Op::List(_) => Some(ProviderResponse::Done(ActionResult::DirEntries(
-                    DirListing {
-                        entries: vec![],
-                        exhaustive: false,
-                    },
-                ))),
-                Op::Read(_) => Some(err("not a file")),
-            };
-        }
-
-        if is_ip_addr(segment) {
-            // Bare IP: direct reverse lookup file
-            return match op {
-                Op::Lookup(_) => Some(file_entry(segment)),
-                Op::Read(id) => Some(Self::read_reverse_ip(id, None, segment)),
-                Op::List(_) => Some(err("not a directory")),
-            };
-        }
-
-        if !is_domain_like(segment) {
-            return None;
-        }
-
-        // Domain directory
-        match op {
-            Op::Lookup(_) => Some(dir_entry(segment)),
-            Op::List(_) => Some(Self::list_domain()),
-            Op::Read(_) => Some(err("not a file")),
-        }
-    }
-
-    /// Two segments: @resolver/target or domain/record.
-    #[route("/{first}/{second}")]
-    fn two_segments(op: Op, first: &str, second: &str) -> Option<ProviderResponse> {
-        if let Some(resolver) = first.strip_prefix('@') {
-            // @resolver/<target>
-            if is_ip_addr(second) {
-                // @resolver/IP: reverse lookup file
-                return match op {
-                    Op::Lookup(_) => Some(file_entry(second)),
-                    Op::Read(id) => Some(Self::read_reverse_ip(id, Some(resolver), second)),
-                    Op::List(_) => Some(err("not a directory")),
-                };
+    fn segment(op: Op, segment: Segment) -> Option<ProviderResponse> {
+        match segment {
+            Segment::Ip(ip) => {
+                let segment = ip.to_string();
+                file_only(op, &segment, |id| Self::read_reverse_ip(id, None, &segment))
             }
-
-            // @resolver/domain: domain directory under resolver
-            return match op {
-                Op::Lookup(_) => Some(dir_entry(second)),
-                Op::List(_) => Some(Self::list_domain()),
-                Op::Read(_) => Some(err("not a file")),
-            };
+            Segment::Domain(domain) => {
+                let segment = domain.as_ref();
+                dir_only(op, segment, |_| Self::list_domain())
+            }
         }
-
-        if !is_domain_like(first) {
-            return None;
-        }
-
-        // domain/<record|_all|_raw>
-        Self::record_handler(op, None, first, second)
     }
 
-    /// Three segments: only valid as @resolver/domain/record.
-    #[route("/{first}/{second}/{third}")]
-    fn three_segments(op: Op, first: &str, second: &str, third: &str) -> Option<ProviderResponse> {
-        let resolver = first.strip_prefix('@')?;
-        Self::record_handler(op, Some(resolver), second, third)
+    #[route("/@{resolver}/{segment}")]
+    fn resolver_segment(op: Op, resolver: &str, segment: Segment) -> Option<ProviderResponse> {
+        match segment {
+            Segment::Ip(ip) => {
+                let segment = ip.to_string();
+                file_only(op, &segment, |id| {
+                    Self::read_reverse_ip(id, Some(resolver), &segment)
+                })
+            }
+            Segment::Domain(domain) => {
+                let segment = domain.as_ref();
+                dir_only(op, segment, |_| Self::list_domain())
+            }
+        }
     }
 
-    // --- Helpers ---
+    #[route("/{domain}/{record}")]
+    fn domain_record(op: Op, domain: DomainName, record: &str) -> Option<ProviderResponse> {
+        let domain = domain.as_ref();
+        Self::record_handler(op, None, domain, record)
+    }
+
+    #[route("/@{resolver}/{domain}/{record}")]
+    fn resolver_domain_record(
+        op: Op,
+        resolver: &str,
+        domain: DomainName,
+        record: &str,
+    ) -> Option<ProviderResponse> {
+        let domain = domain.as_ref();
+        Self::record_handler(op, Some(resolver), domain, record)
+    }
 
     fn list_domain() -> ProviderResponse {
         let mut entries: Vec<DirEntry> = RecordType::all()
@@ -228,24 +196,14 @@ impl DnsProvider {
         record_name: &str,
     ) -> Option<ProviderResponse> {
         match record_name {
-            "_all" => match op {
-                Op::Lookup(_) => Some(file_entry("_all")),
-                Op::Read(id) => Some(Self::read_all(id, resolver, domain)),
-                Op::List(_) => Some(err("not a directory")),
-            },
-            "_raw" => match op {
-                Op::Lookup(_) => Some(file_entry("_raw")),
-                Op::Read(id) => Some(Self::read_raw(id, resolver, domain)),
-                Op::List(_) => Some(err("not a directory")),
-            },
+            "_all" => file_only(op, "_all", |id| Self::read_all(id, resolver, domain)),
+            "_raw" => file_only(op, "_raw", |id| Self::read_raw(id, resolver, domain)),
             "PTR" => None,
             _ => {
                 let rtype = record_name.parse::<RecordType>().ok()?;
-                match op {
-                    Op::Lookup(_) => Some(file_entry(record_name)),
-                    Op::Read(id) => Some(Self::read_record(id, resolver, domain, rtype)),
-                    Op::List(_) => Some(err("not a directory")),
-                }
+                file_only(op, record_name, |id| {
+                    Self::read_record(id, resolver, domain, rtype)
+                })
             }
         }
     }
@@ -258,7 +216,7 @@ impl DnsProvider {
     ) -> ProviderResponse {
         let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, rtype)) {
             Ok(e) => e,
-            Err(e) => return err(&e),
+            Err(e) => return err(ProviderError::internal(e)),
         };
         dispatch(id, Continuation::Single, effect)
     }
@@ -272,7 +230,7 @@ impl DnsProvider {
                 .collect()
         }) {
             Ok(e) => e,
-            Err(e) => return err(&e),
+            Err(e) => return err(ProviderError::internal(e)),
         };
         dispatch_batch(
             id,
@@ -287,7 +245,7 @@ impl DnsProvider {
         let effect = match with_state(|s| doh::query(&s.resolvers, resolver, domain, RecordType::A))
         {
             Ok(e) => e,
-            Err(e) => return err(&e),
+            Err(e) => return err(ProviderError::internal(e)),
         };
         dispatch(
             id,
@@ -299,11 +257,10 @@ impl DnsProvider {
     }
 
     fn read_reverse_ip(id: u64, resolver: Option<&str>, ip: &str) -> ProviderResponse {
-        let effect = match with_state(|s| doh::reverse_query(&s.resolvers, resolver, ip))
-            .and_then(|result| result)
-        {
-            Ok(effect) => effect,
-            Err(e) => return err(&e),
+        let effect = match with_state(|s| doh::reverse_query(&s.resolvers, resolver, ip)) {
+            Ok(Ok(effect)) => effect,
+            Ok(Err(e)) => return err(e),
+            Err(e) => return err(ProviderError::internal(e)),
         };
         dispatch(id, Continuation::Single, effect)
     }

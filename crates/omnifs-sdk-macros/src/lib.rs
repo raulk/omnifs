@@ -5,7 +5,7 @@
 //! It generates WIT trait implementations, state management, dispatch
 //! functions, and a route dispatch chain.
 //!
-//! `#[path("...")]` is a marker attribute consumed by `#[provider]`.
+//! `#[route("...")]` is a marker attribute consumed by `#[provider]`.
 //! Using it outside a `#[provider]` impl block is a compile error.
 
 use proc_macro::TokenStream;
@@ -25,6 +25,7 @@ use syn::{
 enum Segment {
     Literal(String),
     Capture(String),
+    PrefixCapture { prefix: String, name: String },
     Rest(String),
 }
 
@@ -62,6 +63,25 @@ fn parse_template(template: &str) -> Result<Vec<Segment>, String> {
                 return Err(format!("invalid capture name: `{name}`"));
             }
             segments.push(Segment::Capture(name.to_string()));
+        } else if let Some(start) = part.find('{') {
+            if !part.ends_with('}') {
+                return Err(format!("unterminated capture in segment `{part}`"));
+            }
+            if part[start + 1..part.len() - 1].contains('{') {
+                return Err(format!("invalid capture position in segment `{part}`"));
+            }
+            let name = &part[start + 1..part.len() - 1];
+            if part[..start].is_empty() {
+                return Err(format!("invalid capture position in segment `{part}`"));
+            }
+            if name.is_empty() || !is_valid_ident(name) {
+                return Err(format!("invalid capture name: `{name}`"));
+            }
+            let prefix = &part[..start];
+            segments.push(Segment::PrefixCapture {
+                prefix: prefix.to_string(),
+                name: name.to_string(),
+            });
         } else {
             segments.push(Segment::Literal((*part).to_string()));
         }
@@ -222,7 +242,7 @@ fn classify_methods(items: Vec<ImplItem>) -> Result<ClassifiedMethods, syn::Erro
 
         let name = func.sig.ident.to_string();
 
-        // Check for #[path] attribute
+        // Check for #[route] attribute
         if let Some(template) = extract_route_attr(&func.attrs) {
             strip_route_attrs(&mut func.attrs);
             let segments = parse_template(&template).map_err(|e| {
@@ -233,7 +253,9 @@ fn classify_methods(items: Vec<ImplItem>) -> Result<ClassifiedMethods, syn::Erro
             let capture_names: Vec<&str> = segments
                 .iter()
                 .filter_map(|s| match s {
-                    Segment::Capture(n) | Segment::Rest(n) => Some(n.as_str()),
+                    Segment::Capture(n)
+                    | Segment::PrefixCapture { name: n, .. }
+                    | Segment::Rest(n) => Some(n.as_str()),
                     Segment::Literal(_) => None,
                 })
                 .collect();
@@ -394,13 +416,43 @@ fn generate_match_wrapper(type_name: &Ident, route: &PathMethod) -> TokenStream2
                 param_type_idx += 1;
                 seg_idx += 1;
             }
+            Segment::PrefixCapture { prefix, name } => {
+                let ident = format_ident!("{}", name);
+                let ty = param_types[param_type_idx];
+                if is_str_ref(ty) {
+                    capture_bindings.push(quote! {
+                        let #ident: &str = segments[#seg_idx].strip_prefix(#prefix)?;
+                    });
+                } else {
+                    capture_bindings.push(quote! {
+                        let #ident: #ty = segments[#seg_idx]
+                            .strip_prefix(#prefix)?
+                            .parse()
+                            .ok()?;
+                    });
+                }
+                call_args.push(quote! { #ident });
+                param_type_idx += 1;
+                seg_idx += 1;
+            }
             Segment::Rest(name) => {
                 let ident = format_ident!("{}", name);
                 let prefix_count = seg_idx;
-                capture_bindings.push(quote! {
-                    let rest_offset: usize = segments[..#prefix_count].iter().map(|s| s.len() + 1).sum();
-                    let #ident: &str = &path[rest_offset..];
-                });
+                let ty = param_types[param_type_idx];
+                if is_str_ref(ty) {
+                    capture_bindings.push(quote! {
+                        let rest_offset: usize =
+                            segments[..#prefix_count].iter().map(|s| s.len() + 1).sum();
+                        let #ident: &str = &path[rest_offset..];
+                    });
+                } else {
+                    capture_bindings.push(quote! {
+                        let rest_offset: usize =
+                            segments[..#prefix_count].iter().map(|s| s.len() + 1).sum();
+                        let rest: &str = &path[rest_offset..];
+                        let #ident: #ty = rest.parse().ok()?;
+                    });
+                }
                 call_args.push(quote! { #ident });
                 param_type_idx += 1;
                 // rest is always last, no increment needed
@@ -645,14 +697,14 @@ fn generate_state_management(state_type: &Type, cont_type: &Type) -> TokenStream
         pub(crate) fn dispatch(id: u64, cont: #cont_type, effect: omnifs_sdk::prelude::SingleEffect) -> omnifs_sdk::prelude::ProviderResponse {
             match with_pending(|pending| pending.insert(id, cont)) {
                 Ok(_) => omnifs_sdk::prelude::ProviderResponse::Effect(effect),
-                Err(e) => omnifs_sdk::prelude::err(&e),
+                Err(e) => omnifs_sdk::prelude::err(omnifs_sdk::error::ProviderError::internal(e)),
             }
         }
 
         pub(crate) fn dispatch_batch(id: u64, cont: #cont_type, effects: Vec<omnifs_sdk::prelude::SingleEffect>) -> omnifs_sdk::prelude::ProviderResponse {
             match with_pending(|pending| pending.insert(id, cont)) {
                 Ok(_) => omnifs_sdk::prelude::ProviderResponse::Batch(effects),
-                Err(e) => omnifs_sdk::prelude::err(&e),
+                Err(e) => omnifs_sdk::prelude::err(omnifs_sdk::error::ProviderError::internal(e)),
             }
         }
     }
@@ -803,34 +855,31 @@ fn config_item_impl(item: Item) -> Result<TokenStream2, syn::Error> {
     }
 }
 
-fn add_config_attrs_to_struct(item: &mut ItemStruct) {
-    item.attrs.push(syn::parse_quote! {
-        #[derive(omnifs_sdk::serde::Deserialize, omnifs_sdk::schemars::JsonSchema)]
+fn add_config_attrs(attrs: &mut Vec<Attribute>) {
+    attrs.push(syn::parse_quote! {
+        #[derive(
+            std::fmt::Debug,
+            omnifs_sdk::serde::Deserialize,
+            omnifs_sdk::schemars::JsonSchema,
+        )]
     });
-    item.attrs.push(syn::parse_quote! {
+    attrs.push(syn::parse_quote! {
         #[serde(crate = "omnifs_sdk::serde")]
     });
-    item.attrs.push(syn::parse_quote! {
+    attrs.push(syn::parse_quote! {
         #[serde(deny_unknown_fields)]
     });
-    item.attrs.push(syn::parse_quote! {
+    attrs.push(syn::parse_quote! {
         #[schemars(crate = "omnifs_sdk::schemars")]
     });
 }
 
+fn add_config_attrs_to_struct(item: &mut ItemStruct) {
+    add_config_attrs(&mut item.attrs);
+}
+
 fn add_config_attrs_to_enum(item: &mut ItemEnum) {
-    item.attrs.push(syn::parse_quote! {
-        #[derive(omnifs_sdk::serde::Deserialize, omnifs_sdk::schemars::JsonSchema)]
-    });
-    item.attrs.push(syn::parse_quote! {
-        #[serde(crate = "omnifs_sdk::serde")]
-    });
-    item.attrs.push(syn::parse_quote! {
-        #[serde(deny_unknown_fields)]
-    });
-    item.attrs.push(syn::parse_quote! {
-        #[schemars(crate = "omnifs_sdk::schemars")]
-    });
+    add_config_attrs(&mut item.attrs);
 }
 
 #[proc_macro_attribute]

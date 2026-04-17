@@ -17,7 +17,7 @@ pub fn resume(_id: u64, cont: Continuation, outcome: EffectResult) -> ProviderRe
 }
 
 fn resume_single(outcome: &EffectResult) -> ProviderResponse {
-    let body = match extract_body(outcome) {
+    let body = match extract_effect_body(outcome) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -46,7 +46,7 @@ fn resume_all(mut accumulated: Vec<DnsRecord>, outcome: &EffectResult) -> Provid
 }
 
 fn resume_raw(domain: &str, outcome: &EffectResult) -> ProviderResponse {
-    let body = match extract_body(outcome) {
+    let body = match extract_effect_body(outcome) {
         Ok(b) => b,
         Err(resp) => return resp,
     };
@@ -69,20 +69,6 @@ fn resume_raw(domain: &str, outcome: &EffectResult) -> ProviderResponse {
 
 pub(crate) fn file_content(s: String) -> ProviderResponse {
     ProviderResponse::Done(ActionResult::FileContent(s.into_bytes()))
-}
-
-fn extract_body(outcome: &EffectResult) -> Result<&[u8], ProviderResponse> {
-    let result = match outcome {
-        EffectResult::Single(r) => r,
-        EffectResult::Batch(v) if !v.is_empty() => &v[0],
-        EffectResult::Batch(_) => return Err(err("empty batch result")),
-    };
-    match result {
-        SingleEffectResult::HttpResponse(resp) if resp.status < 400 => Ok(&resp.body),
-        SingleEffectResult::HttpResponse(resp) => Err(err(&format!("HTTP {}", resp.status))),
-        SingleEffectResult::EffectError(e) => Err(err(&format!("effect error: {}", e.message))),
-        _ => Err(err("unexpected effect result type")),
-    }
 }
 
 pub(crate) fn resolvers_content() -> ProviderResponse {

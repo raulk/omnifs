@@ -84,6 +84,12 @@ impl<'a> FsPath<'a> {
     ///
     /// Returns `None` if the path is invalid or contains unsafe segments.
     pub fn parse(path: &'a str) -> Option<FsPath<'a>> {
+        fn repo_tree_path<'a>(path: &'a str) -> Option<&'a str> {
+            let marker = "/_repo/";
+            let pos = path.find(marker)?;
+            Some(&path[(pos + marker.len())..])
+        }
+
         if path.is_empty() {
             return Some(FsPath::Root);
         }
@@ -194,7 +200,7 @@ impl<'a> FsPath<'a> {
                 }
 
                 if ns == "_repo" {
-                    let tree_path = &path[(path.find("/_repo/").unwrap() + 7)..];
+                    let tree_path = repo_tree_path(path)?;
                     if !is_safe_tree_path(tree_path) {
                         return None;
                     }
@@ -264,7 +270,7 @@ impl<'a> FsPath<'a> {
                 }
 
                 if ns == "_repo" {
-                    let tree_path = &path[(path.find("/_repo/").unwrap() + 7)..];
+                    let tree_path = repo_tree_path(path)?;
                     if !is_safe_tree_path(tree_path) {
                         return None;
                     }
@@ -307,7 +313,7 @@ impl<'a> FsPath<'a> {
                 }
 
                 if ns == "_repo" {
-                    let tree_path = &path[(path.find("/_repo/").unwrap() + 7)..];
+                    let tree_path = repo_tree_path(path)?;
                     if !is_safe_tree_path(tree_path) {
                         return None;
                     }
@@ -334,7 +340,7 @@ impl<'a> FsPath<'a> {
                     return None;
                 }
 
-                let tree_path = &path[(path.find("/_repo/").unwrap() + 7)..];
+                let tree_path = repo_tree_path(path)?;
                 if !is_safe_tree_path(tree_path) {
                     return None;
                 }

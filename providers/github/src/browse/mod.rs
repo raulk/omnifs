@@ -28,7 +28,9 @@ pub fn resume(id: u64, cont: Continuation, effect_outcome: EffectResult) -> Prov
     let result = match &effect_outcome {
         EffectResult::Single(r) => r,
         EffectResult::Batch(results) if !results.is_empty() => &results[0],
-        EffectResult::Batch(_) => return err("empty batch result"),
+        EffectResult::Batch(_) => {
+            return err(ProviderError::internal("empty batch result"));
+        }
     };
 
     match cont {
@@ -68,14 +70,18 @@ pub fn resume(id: u64, cont: Continuation, effect_outcome: EffectResult) -> Prov
 
 // --- Shared helpers ---
 
-pub(crate) fn err(msg: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::Err(msg.to_string()))
+pub(crate) fn err(error: impl Into<ProviderError>) -> ProviderResponse {
+    omnifs_sdk::prelude::err(error)
 }
 
-pub(crate) fn dispatch(id: u64, cont: Continuation, effect: SingleEffect) -> ProviderResponse {
+pub(crate) fn dispatch_or_err(
+    id: u64,
+    cont: Continuation,
+    effect: SingleEffect,
+) -> ProviderResponse {
     match crate::with_pending(|p| p.insert(id, cont)) {
         Ok(_) => ProviderResponse::Effect(effect),
-        Err(e) => err(&e),
+        Err(e) => err(ProviderError::internal(e)),
     }
 }
 
@@ -96,6 +102,10 @@ pub(crate) fn is_unauthorized(result: &SingleEffectResult) -> bool {
     )
 }
 
+pub(crate) fn get_cached(key: &str) -> Result<Option<Vec<u8>>, String> {
+    with_state(|state| state.cache.get(key).map(<[u8]>::to_vec))
+}
+
 pub(crate) fn touch_repo(owner: &str, repo: &str) {
     if !crate::types::is_safe_segment(owner) || !crate::types::is_safe_segment(repo) {
         return;
@@ -111,13 +121,15 @@ pub(crate) fn extract_http_body(result: &SingleEffectResult) -> Result<&[u8], Pr
         SingleEffectResult::HttpResponse(resp) => {
             check_rate_limit(resp);
             if resp.status >= 400 {
-                Err(err(&format!("API error: {}", resp.status)))
+                Err(err(ProviderError::from_http_status(resp.status)))
             } else {
                 Ok(&resp.body)
             }
         }
-        SingleEffectResult::EffectError(e) => Err(err(&format!("effect error: {}", e.message))),
-        _ => Err(err("unexpected effect result type")),
+        SingleEffectResult::EffectError(e) => Err(err(ProviderError::from_effect_error(e))),
+        _ => Err(err(ProviderError::internal(
+            "unexpected effect result type",
+        ))),
     }
 }
 
@@ -171,24 +183,6 @@ pub(crate) fn truncate_content(mut data: Vec<u8>) -> Vec<u8> {
     data.truncate(MAX_CONTENT_SIZE.saturating_sub(TRUNCATION_MARKER.len()));
     data.extend_from_slice(TRUNCATION_MARKER);
     data
-}
-
-pub(crate) fn dir_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-        name: name.to_string(),
-        kind: EntryKind::Directory,
-        size: None,
-        projected_files: None,
-    })))
-}
-
-pub(crate) fn file_entry(name: &str) -> ProviderResponse {
-    ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-        name: name.to_string(),
-        kind: EntryKind::File,
-        size: Some(4096),
-        projected_files: None,
-    })))
 }
 
 // Re-export helper functions that submodules need from resources module

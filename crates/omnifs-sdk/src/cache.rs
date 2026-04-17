@@ -39,15 +39,15 @@ impl Cache {
 
     pub fn set(&mut self, key: String, data: Vec<u8>) {
         self.entries.remove(&key);
-        if self.entries.len() >= self.max_entries {
-            let oldest_key = self
-                .entries
+        let oldest_key = (self.entries.len() >= self.max_entries).then(|| {
+            self.entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.inserted_at)
-                .map(|(k, _)| k.clone());
-            if let Some(k) = oldest_key {
-                self.entries.remove(&k);
-            }
+                .map(|(k, _)| k.clone())
+        });
+
+        if let Some(oldest_key) = oldest_key.flatten() {
+            self.entries.remove(&oldest_key);
         }
         self.entries.insert(
             key,
