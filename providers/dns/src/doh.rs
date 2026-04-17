@@ -1,11 +1,44 @@
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use hickory_proto::op::{Message, ResponseCode};
+#[cfg(test)]
+use hickory_proto::rr::{rdata::A, Name, Record, RData};
+
 use crate::types::RecordType;
 use omnifs_sdk::prelude::*;
 
 const CLOUDFLARE_DOH: &str = "https://cloudflare-dns.com/dns-query";
-const GOOGLE_DOH: &str = "https://dns.google/resolve";
+const GOOGLE_DOH: &str = "https://dns.google/dns-query";
+
+#[derive(Debug)]
+enum DohError {
+    Parse(String),
+    DnsResponse(ResponseCode),
+}
+
+impl DohError {
+    fn into_provider_error(self) -> ProviderError {
+        match self {
+            Self::Parse(message) => ProviderError::invalid_input(format!("invalid DoH DNS message: {message}")),
+            Self::DnsResponse(code) => match code {
+                ResponseCode::FormErr => {
+                    ProviderError::invalid_input("DNS FORMERR (rcode FORMERR)".to_string())
+                }
+                ResponseCode::ServFail => {
+                    ProviderError::network("DNS SERVFAIL (rcode SERVFAIL)".to_string(), true)
+                }
+                ResponseCode::NXDomain => {
+                    ProviderError::not_found("DNS NXDOMAIN (rcode NXDOMAIN)".to_string())
+                }
+                ResponseCode::Refused => {
+                    ProviderError::denied("DNS REFUSED (rcode REFUSED)".to_string())
+                }
+                _ => ProviderError::internal(format!("DNS response code error ({code})")),
+            },
+        }
+    }
+}
 
 /// Validated `DoH` endpoint URL (always HTTPS).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,65 +253,34 @@ pub(crate) fn query(
         url,
         headers: vec![Header {
             name: "Accept".to_string(),
-            value: "application/dns-json".to_string(),
+            value: "application/dns-message".to_string(),
         }],
         body: None,
     })
 }
 
-/// `DoH` JSON response (RFC 8484 / Cloudflare/Google convention).
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct DohResponse {
-    status: u64,
-    #[serde(default)]
-    answer: Vec<DohAnswer>,
-}
-
-#[derive(serde::Deserialize)]
-struct DohAnswer {
-    #[serde(rename = "type", default)]
-    rtype: u16,
-    #[serde(rename = "TTL", default = "default_ttl")]
-    ttl: u64,
-    #[serde(default)]
-    data: String,
-}
-
-fn default_ttl() -> u64 {
-    300
-}
-
 pub(crate) fn parse_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), ProviderError> {
-    let resp: DohResponse = serde_json::from_slice(body)
-        .map_err(|e| ProviderError::invalid_input(format!("invalid DoH JSON: {e}")))?;
+    parse_doh_response(body).map_err(DohError::into_provider_error)
+}
 
-    if resp.status != 0 {
-        let _name = match resp.status {
-            1 => "FORMERR",
-            2 => "SERVFAIL",
-            3 => "NXDOMAIN",
-            5 => "REFUSED",
-            _ => "ERROR",
-        };
-        return Err(match resp.status {
-            1 => ProviderError::invalid_input(format!("DNS FORMERR (status {})", resp.status)),
-            2 => ProviderError::network(format!("DNS SERVFAIL (status {})", resp.status), true),
-            3 => ProviderError::not_found(format!("DNS NXDOMAIN (status {})", resp.status)),
-            5 => ProviderError::denied(format!("DNS REFUSED (status {})", resp.status)),
-            _ => ProviderError::internal(format!("DNS ERROR (status {})", resp.status)),
-        });
+fn parse_doh_response(body: &[u8]) -> Result<(Vec<crate::DnsRecord>, u64), DohError> {
+    let response = Message::from_vec(body)
+        .map_err(|e| DohError::Parse(e.to_string()))?;
+
+    if response.response_code() != ResponseCode::NoError {
+        return Err(DohError::DnsResponse(response.response_code()));
     }
 
     let mut min_ttl = u64::MAX;
     let mut records = Vec::new();
 
-    for a in &resp.answer {
-        min_ttl = min_ttl.min(a.ttl);
-        if let Some(rtype) = RecordType::from_wire(a.rtype) {
+    for answer in response.answers() {
+        let maybe_type = RecordType::from_wire(u16::from(answer.record_type()));
+        if let Some(rtype) = maybe_type {
+            min_ttl = min_ttl.min(u64::from(answer.ttl()));
             records.push(crate::DnsRecord {
                 rtype,
-                value: a.data.clone(),
+                value: answer.data().to_string(),
             });
         }
     }
@@ -420,14 +422,14 @@ mod tests {
 
     #[test]
     fn parse_doh_response() {
-        let json = br#"{
-            "Status": 0,
-            "Answer": [
-                {"name": "example.com.", "type": 1, "TTL": 300, "data": "93.184.216.34"},
-                {"name": "example.com.", "type": 1, "TTL": 200, "data": "93.184.216.35"}
-            ]
-        }"#;
-        let (records, ttl) = parse_response(json).unwrap();
+        let response = make_dns_message_response(
+            ResponseCode::NoError,
+            [
+                ("example.com", 300, "93.184.216.34"),
+                ("example.com", 200, "93.184.216.35"),
+            ],
+        );
+        let (records, ttl) = parse_response(&response).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].value, "93.184.216.34");
         assert_eq!(records[1].value, "93.184.216.35");
@@ -436,8 +438,31 @@ mod tests {
 
     #[test]
     fn parse_nxdomain() {
-        let err = parse_response(br#"{"Status": 3}"#).unwrap_err();
+        let response = make_dns_message_response(ResponseCode::NXDomain, []);
+        let err = parse_response(&response).unwrap_err();
         assert!(err.to_string().contains("NXDOMAIN"));
+    }
+
+    fn make_dns_message_response(
+        response_code: ResponseCode,
+        answers: impl IntoIterator<Item = (&'static str, u32, &'static str)>,
+    ) -> Vec<u8> {
+        let mut response = Message::new();
+        response.set_response_code(response_code);
+        let records: Vec<_> = answers
+            .into_iter()
+            .map(|(domain, ttl, address)| make_a_record(domain, ttl, address))
+            .collect();
+        response.add_answers(records);
+        response.to_vec().unwrap()
+    }
+
+    fn make_a_record(domain: &str, ttl: u32, address: &str) -> Record {
+        Record::from_rdata(
+            Name::from_ascii(domain).unwrap(),
+            ttl,
+            RData::A(A(address.parse::<std::net::Ipv4Addr>().unwrap())),
+        )
     }
 
     #[test]
