@@ -1,7 +1,7 @@
 //! Domain types for the GitHub provider's virtual filesystem structure.
 
-use serde::Deserialize;
 use core::str::FromStr;
+use serde::Deserialize;
 
 /// State filter for resources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr)]

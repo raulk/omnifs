@@ -5,8 +5,8 @@
 //! Exposes GitHub resources (issues, PRs, actions, repository contents)
 //! as a virtual filesystem using the omnifs provider WIT interface.
 
-use omnifs_sdk::prelude::ProviderError;
 use crate::types::RepoId;
+use omnifs_sdk::prelude::ProviderError;
 pub(crate) use omnifs_sdk::prelude::Result;
 
 mod actions;
