@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -110,7 +110,12 @@ jobs:
           compression-level: 0
 
   docker-pull-smoke:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && (
+        contains(fromJSON('["raulk"]'), github.event.pull_request.user.login) ||
+        contains(github.event.pull_request.labels.*.name, 'ci-full')
+      ))
     runs-on: ubuntu-latest
     needs: rust-build-test
     timeout-minutes: 30
@@ -210,7 +215,12 @@ jobs:
         run: docker rm -f omnifs-smoke >/dev/null 2>&1 || true
 
   docker-compose-smoke:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && (
+        contains(fromJSON('["raulk"]'), github.event.pull_request.user.login) ||
+        contains(github.event.pull_request.labels.*.name, 'ci-full')
+      ))
     runs-on: ubuntu-latest
     needs: rust-build-test
     timeout-minutes: 30
@@ -283,7 +293,12 @@ jobs:
   docker-publish:
     runs-on: ubuntu-latest
     needs: [rust-lint, rust-build-test, docker-pull-smoke, docker-compose-smoke]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && (
+        contains(fromJSON('["raulk"]'), github.event.pull_request.user.login) ||
+        contains(github.event.pull_request.labels.*.name, 'ci-full')
+      ))
     permissions:
       contents: read
       packages: write
@@ -312,6 +327,7 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
+            type=ref,event=pr
             type=sha,prefix=sha-
 
       - name: Publish Docker image
