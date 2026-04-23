@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,20 +20,9 @@ env:
   DOCKER_IMAGE_NAME: omnifs-ci
   DOCKER_IMAGE_ARTIFACT: omnifs-ci-image
   DOCKER_CACHE_SCOPE: omnifs-image-${{ github.head_ref || github.ref_name }}
-  PR_APPROVAL_LABEL: ci-approved
 
 jobs:
-  pr-gate:
-    runs-on: ubuntu-latest
-    outputs:
-      approved: ${{ steps.gate.outputs.approved }}
-    steps:
-      - id: gate
-        run: echo "approved=${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, env.PR_APPROVAL_LABEL) }}" >> "$GITHUB_OUTPUT"
-
   rust-lint:
-    if: needs.pr-gate.outputs.approved == 'true'
-    needs: pr-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -59,14 +48,12 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run core clippy
-        run: cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk -- -D warnings
+        run: cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk -p omnifs-sdk-macros -p omnifs-mount-schema -- -D warnings
 
       - name: Run provider clippy
         run: cargo clippy -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 -- -D warnings
 
   rust-build-test:
-    if: needs.pr-gate.outputs.approved == 'true'
-    needs: pr-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -98,10 +85,7 @@ jobs:
               -p omnifs-provider-github -p omnifs-provider-dns -p test-provider
 
       - name: Run core tests
-        run: cargo nextest run --release -p omnifs-cli -p omnifs-host -p omnifs-sdk
-
-      - name: Run trybuild UI fixtures
-        run: cargo test -p omnifs-sdk-macros --test macros_ui
+        run: cargo nextest run --release -p omnifs-cli -p omnifs-host -p omnifs-sdk -p omnifs-sdk-macros -p omnifs-mount-schema
 
       - name: Check provider test compilation
         run: cargo test -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 --no-run
@@ -118,7 +102,7 @@ jobs:
           cp target/wasm32-wasip2/release/omnifs_provider_dns.wasm dist/omnifs_provider_dns.wasm
 
       - name: Upload runtime artifacts
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: omnifs-runtime-artifacts
           path: dist/
@@ -134,7 +118,7 @@ jobs:
       - uses: actions/checkout@v6.0.2
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           name: omnifs-runtime-artifacts
           path: dist
@@ -159,7 +143,7 @@ jobs:
 
       - name: Upload Docker image
         if: steps.docker-build.outcome == 'success'
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ env.DOCKER_IMAGE_ARTIFACT }}
           path: /tmp/omnifs-ci.tar
@@ -305,7 +289,7 @@ jobs:
       packages: write
     steps:
       - name: Download Docker image
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.1
         with:
           name: ${{ env.DOCKER_IMAGE_ARTIFACT }}
           path: /tmp
