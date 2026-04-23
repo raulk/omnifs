@@ -1,6 +1,7 @@
 /target
 /providers/target
 /dist
+.worktrees/
 
 .DS_Store
 .env
@@ -19,6 +20,8 @@ providers/*/src/bindings.rs
 
 # Internal design docs (not published)
 docs/internal/
+docs/superpowers/plans/
 
 # Linear CLI workspace config
 .linear.toml
+.worktrees/

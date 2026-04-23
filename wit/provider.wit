@@ -9,9 +9,12 @@ interface types {
     type tree-ref = u64;
     type file-handle = u64;
 
-    // --- Effects (provider -> host, non-recursive) ---
+    // --- Callouts (provider -> host, request/response) ---
 
-    variant single-effect {
+    /// Work the host runs on the provider's behalf. Every callout expects
+    /// a matching `callout-result` back via `resume`; there are no
+    /// fire-and-forget callouts.
+    variant callout {
         fetch(http-request),
         stream-open(http-request),
         stream-recv(stream-id),
@@ -21,83 +24,135 @@ interface types {
         ws-recv(ws-recv-request),
         ws-close(stream-id),
         git-open-repo(git-open-request),
-        git-list-tree(git-tree-request),
-        git-read-blob(git-blob-request),
-        git-head-ref(repo-id),
-        git-list-cached-repos(git-cache-list-request),
-        kv-get(string),
-        kv-set(kv-set-request),
-        kv-delete(string),
-        kv-list-keys(string),
-        cache-invalidate-prefix(cache-invalidate-request),
     }
 
-    variant provider-response {
-        done(action-result),
-        effect(single-effect),
-        batch(list<single-effect>),
+    /// Unified provider return value. A handler may return:
+    ///
+    /// - `terminal = some(...), callouts = []` — pure terminal.
+    /// - `terminal = none, callouts = [..]` — suspension: host runs the
+    ///   callouts and calls `resume(id, results)`.
+    /// - `terminal = some(...), callouts = [..]` — terminal with trailing
+    ///   callouts (rare; host executes them, discards results, returns the
+    ///   terminal).
+    /// - Both empty is a protocol error.
+    record provider-return {
+        callouts: list<callout>,
+        terminal: option<op-result>,
     }
 
-    // --- Effect results (host -> provider, non-recursive) ---
+    /// Top-level terminal. Every non-`err` variant is 1:1 with a handler
+    /// operation; the arm name matches the operation, not the payload
+    /// shape.
+    variant op-result {
+        lookup(lookup-result),
+        %list(list-result),
+        read(file-content-result),
+        init(provider-info),
+        event(event-outcome),
+        err(provider-error),
+        plan-mutations(list<planned-mutation>),
+        execute(mutation-outcome),
+        fetch-resource(list<file-entry>),
+    }
 
-    variant single-effect-result {
+    // --- Callout results (host -> provider, non-recursive) ---
+
+    variant callout-result {
         http-response(http-response),
         stream-opened(stream-id),
         stream-chunk(option<list<u8>>),
+        stream-closed,
         ws-connected(stream-id),
         ws-message(option<list<u8>>),
         ws-closed,
-        stream-closed,
         git-repo-opened(git-repo-info),
-        git-tree-entries(list<git-tree-entry>),
-        git-blob-data(list<u8>),
-        git-ref(string),
-        git-cached-repos(list<git-cached-repo>),
-        kv-value(option<list<u8>>),
-        kv-ok,
-        kv-keys(list<string>),
-        cache-ok,
-        effect-error(effect-error),
+        callout-error(callout-error),
     }
 
-    record effect-error {
+    record callout-error {
         kind: error-kind,
         message: string,
         retryable: bool,
     }
 
     enum error-kind {
+        not-found,
+        not-a-directory,
+        not-a-file,
+        permission-denied,
+        invalid-input,
+        too-large,
         network,
         timeout,
         denied,
-        not-found,
         rate-limited,
         version-mismatch,
         internal,
     }
 
-    variant effect-result {
-        single(single-effect-result),
-        batch(list<single-effect-result>),
+    type callout-results = list<callout-result>;
+
+    record provider-error {
+        kind: error-kind,
+        message: string,
+        retryable: bool,
     }
 
-    // --- Action results (terminal) ---
+    // --- Terminal payloads ---
 
-    variant action-result {
-        dir-entries(dir-listing),
-        dir-entry-option(option<dir-entry>),
-        file-content(list<u8>),
-        file-chunk(list<u8>),
-        file-opened(file-handle),
-        mutations-planned(list<planned-mutation>),
-        mutation-executed(mutation-outcome),
-        resource-files(list<file-entry>),
-        provider-initialized(provider-info),
-        disowned-tree(tree-ref),
-        ok,
-        err(string),
+    /// Lookup terminal. `subtree(tree-ref)` lets `lookup-child` return a
+    /// subtree handoff directly. `not-found` is bare by design; it carries
+    /// no siblings or sibling-files.
+    variant lookup-result {
+        entry(lookup-entry),
+        subtree(tree-ref),
+        not-found,
     }
 
+    /// The non-subtree, non-miss shape of a lookup: the found entry plus
+    /// cache-adjacent data. `target` is non-optional because the miss
+    /// case is the `not-found` arm of `lookup-result`, not a null target.
+    record lookup-entry {
+        target: dir-entry,
+        siblings: list<dir-entry>,
+        sibling-files: list<projected-file>,
+
+        /// Whether the siblings list is exhaustive.
+        ///
+        /// When true, the host treats absence from `siblings` as
+        /// authoritative negative: any lookup for a name not listed
+        /// returns ENOENT without another provider call. Set false
+        /// when siblings come from a paginated or capped source that
+        /// may omit valid children.
+        exhaustive: bool,
+
+        /// Content the provider already has in hand for named paths
+        /// nested under the looked-up entry. Equivalent to
+        /// `dir-listing.preload` and applied at the same boundary:
+        /// when a directory lookup hits a dir handler that staged
+        /// preloads for its children, those preloads flow out with
+        /// the lookup terminal rather than being dropped.
+        preload: list<preloaded-file>,
+    }
+
+    /// List terminal. `subtree(tree-ref)` lets `list-children` return a
+    /// subtree handoff directly.
+    variant list-result {
+        entries(dir-listing),
+        subtree(tree-ref),
+    }
+
+    /// Event handler terminal. Carries invalidations the host must apply
+    /// at the response boundary. Empty lists are valid (no-op terminal).
+    record event-outcome {
+        invalidate-paths: list<string>,
+        invalidate-prefixes: list<string>,
+    }
+
+    record file-content-result {
+        content: list<u8>,
+        sibling-files: list<projected-file>,
+    }
 
     // --- Data types ---
 
@@ -138,23 +193,9 @@ interface types {
         cache-key: string,
     }
 
-    record git-tree-request {
-        repo: repo-id,
-        ref-name: string,
-        path: string,
-    }
-
-    record git-blob-request {
-        repo: repo-id,
-        oid: string,
-    }
-
-    record git-cache-list-request {
-        prefix: option<string>,
-    }
-
-    record git-cached-repo {
-        cache-key: string,
+    variant cursor {
+        opaque(string),
+        page(u32),
     }
 
     record git-repo-info {
@@ -162,26 +203,13 @@ interface types {
         tree: tree-ref,
     }
 
-    record git-tree-entry {
-        name: string,
-        mode: u32,
-        oid: string,
-        kind: git-entry-kind,
-    }
-
-    enum git-entry-kind {
-        blob,
-        tree,
-        commit,
-    }
-
-    record kv-set-request {
-        key: string,
-        value: list<u8>,
-    }
-
-    record cache-invalidate-request {
-        prefix: string,
+    /// File content the provider hands to the host so that a later read
+    /// of `path` can be served without another provider round trip. Used
+    /// to fan out adjacent data from an upstream payload the handler has
+    /// already fetched.
+    record preloaded-file {
+        path: string,
+        content: list<u8>,
     }
 
     record log-entry {
@@ -217,17 +245,25 @@ interface types {
         /// When true, absence from the entry list is a sound negative
         /// lookup: the host may return ENOENT for any name not listed
         /// without consulting the provider. This property applies only
-        /// to immediate child names; it says nothing about freshness,
-        /// metadata accuracy, or recursive subtree completeness.
-        /// Freshness is governed separately by TTL and invalidation.
+        /// to immediate child names; it says nothing about metadata
+        /// accuracy or recursive subtree completeness. Freshness is
+        /// governed by explicit invalidation; cached listings do not
+        /// expire on time.
         ///
         /// Set true when the set of children is structurally known
         /// (fixed schemas, confirmed empties). Set false when the
-        /// listing comes from a paginated API, a cache-only subset,
-        /// a capped query, or any source that may omit valid children.
-        /// The host still caches non-exhaustive entries for readdir;
-        /// it just will not use them to deny lookups.
+        /// listing comes from a paginated API, a capped query, or any
+        /// source that may omit valid children. The host still caches
+        /// non-exhaustive entries for readdir; it just will not use
+        /// them to deny lookups.
         exhaustive: bool,
+
+        /// Content the provider already has in hand for named paths under
+        /// or adjacent to this listing. The host caches these so a later
+        /// read of each path is served without another provider round
+        /// trip. Consumed at the response boundary; the cached listing
+        /// carries an empty preload list.
+        preload: list<preloaded-file>,
     }
 
     record dir-entry {
@@ -302,16 +338,14 @@ interface types {
         description: string,
     }
 
-    record config-field {
-        name: string,
-        field-type: string,
-        required: bool,
-        default-value: option<string>,
-        description: string,
+    record active-path-set {
+        mount-id: string,
+        mount-name: string,
+        paths: list<string>,
     }
 
-    record config-schema {
-        fields: list<config-field>,
+    record timer-tick-context {
+        active-paths: list<active-path-set>,
     }
 
     record requested-capabilities {
@@ -327,7 +361,7 @@ interface types {
     variant provider-event {
         file-changed(string),
         webhook-received(list<u8>),
-        timer-tick,
+        timer-tick(timer-tick-context),
         auth-refreshed,
     }
 }
@@ -335,56 +369,54 @@ interface types {
 // === Provider exports ===
 
 interface lifecycle {
-    use types.{provider-response, config-schema, requested-capabilities};
+    use types.{provider-return, requested-capabilities};
 
-    initialize: func(config: list<u8>) -> provider-response;
+    initialize: func(config: list<u8>) -> provider-return;
     shutdown: func();
-    get-config-schema: func() -> config-schema;
+    get-config-schema: func() -> option<string>;
     capabilities: func() -> requested-capabilities;
 }
 
 interface browse {
-    use types.{provider-response, correlation-id};
+    use types.{provider-return, correlation-id};
 
     lookup-child: func(id: correlation-id, parent-path: string, name: string)
-        -> provider-response;
+        -> provider-return;
     list-children: func(id: correlation-id, path: string)
-        -> provider-response;
+        -> provider-return;
     read-file: func(id: correlation-id, path: string)
-        -> provider-response;
+        -> provider-return;
     open-file: func(id: correlation-id, path: string)
-        -> provider-response;
+        -> provider-return;
     read-chunk: func(id: correlation-id, handle: u64, offset: u64, len: u32)
-        -> provider-response;
+        -> provider-return;
     close-file: func(handle: u64);
 }
 
 interface reconcile {
-    use types.{provider-response, correlation-id, file-change, planned-mutation};
+    use types.{provider-return, correlation-id, file-change, planned-mutation};
 
     plan-mutations: func(id: correlation-id, changes: list<file-change>)
-        -> provider-response;
+        -> provider-return;
     execute: func(id: correlation-id, mutation: planned-mutation)
-        -> provider-response;
+        -> provider-return;
     fetch-resource: func(id: correlation-id, resource-path: string)
-        -> provider-response;
-    list-scope: func(id: correlation-id, scope: string)
-        -> provider-response;
+        -> provider-return;
 }
 
 interface resume {
-    use types.{provider-response, correlation-id, effect-result};
+    use types.{provider-return, correlation-id, callout-results};
 
-    resume: func(id: correlation-id, effect-outcome: effect-result)
-        -> provider-response;
+    resume: func(id: correlation-id, callout-outcome: callout-results)
+        -> provider-return;
     cancel: func(id: correlation-id);
 }
 
 interface notify {
-    use types.{provider-response, correlation-id, provider-event};
+    use types.{provider-return, correlation-id, provider-event};
 
     on-event: func(id: correlation-id, event: provider-event)
-        -> provider-response;
+        -> provider-return;
 }
 
 // === Host import ===

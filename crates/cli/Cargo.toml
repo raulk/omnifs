@@ -13,12 +13,17 @@ path = "src/main.rs"
 
 [dependencies]
 omnifs-host = { path = "../host" }
+omnifs-mount-schema = { path = "../omnifs-mount-schema" }
+wasmparser = "0.246"
 clap = { workspace = true }
 dirs-next = "2"
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

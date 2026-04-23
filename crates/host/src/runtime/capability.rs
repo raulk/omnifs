@@ -5,6 +5,8 @@
 
 use std::net::IpAddr;
 
+use url::Url;
+
 #[derive(Debug, Clone)]
 pub struct CapabilityGrants {
     pub domains: Vec<String>,
@@ -39,8 +41,7 @@ impl CapabilityChecker {
     }
 
     pub fn check_url(&self, url: &str) -> Result<(), CapabilityError> {
-        let parsed =
-            url::Url::parse(url).map_err(|e| CapabilityError::InvalidUrl(e.to_string()))?;
+        let parsed = Url::parse(url).map_err(|e| CapabilityError::InvalidUrl(e.to_string()))?;
 
         if parsed.scheme() != "https" {
             return Err(CapabilityError::HttpDenied);
@@ -106,7 +107,7 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
                 || v4.is_private()
                 || v4.is_link_local()
                 || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
-        }
+        },
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || {
@@ -119,6 +120,6 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
                     let segments = v6.segments();
                     (segments[0] & 0xfe00) == 0xfc00
                 }
-        }
+        },
     }
 }

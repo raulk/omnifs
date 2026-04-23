@@ -1,25 +1,11 @@
 //! Host browse cache types and serialization.
 //!
 //! Defines the shared types used by both L0 (in-memory moka) and
-//! L2 (durable redb) cache tiers.
-//!
-//! Submodule declarations (`pub mod l0`, `pub mod l2`) are added
-//! incrementally in Tasks 3 and 4 as each tier is implemented.
+//! L2 (durable redb) cache tiers. Cache entries do not carry TTLs:
+//! eviction is driven purely by capacity and explicit invalidation
+//! (via `delete_prefix` or provider-driven cache-invalidate effects).
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-pub const SCHEMA_VERSION: u8 = 1;
-
-/// TTL constants by record class.
-pub mod ttl {
-    use std::time::Duration;
-    pub const DIRENTS: Duration = Duration::from_secs(120);
-    pub const ATTR: Duration = Duration::from_secs(300);
-    pub const LOOKUP_POSITIVE: Duration = Duration::from_secs(300);
-    pub const LOOKUP_NEGATIVE: Duration = Duration::from_secs(30);
-    pub const PROJECTED_FILE: Duration = Duration::from_secs(600);
-    pub const BULK_FILE: Duration = Duration::from_secs(3600);
-}
+pub const SCHEMA_VERSION: u8 = 2;
 
 /// L0 sizing constants.
 pub const L0_MAX_WEIGHT: u64 = 32 * 1024 * 1024; // 32 MiB per provider instance
@@ -61,75 +47,43 @@ pub enum EntryKindCache {
     File = 1,
 }
 
-// No manual from_u8 needed; serde handles deserialization via postcard.
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheRecord {
     pub schema_version: u8,
     pub kind: RecordKind,
-    pub created_at: u64,
-    pub expires_at: u64,
     pub payload: Vec<u8>,
 }
 
 impl CacheRecord {
-    /// Create a new record with the given kind, TTL, and payload.
-    pub fn new(kind: RecordKind, ttl: Duration, payload: Vec<u8>) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+    pub fn new(kind: RecordKind, payload: Vec<u8>) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             kind,
-            created_at: now,
-            expires_at: now + ttl.as_secs(),
             payload,
         }
     }
 
-    pub fn is_expired(&self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        now >= self.expires_at
-    }
-
-    pub fn ttl_duration(&self) -> Duration {
-        Duration::from_secs(self.expires_at.saturating_sub(self.created_at))
-    }
-
-    /// Serialize to bytes:
-    /// [`schema_version:1`][`kind:1`][`created_at:8`][`expires_at:8`][`payload:*`]
+    /// Serialize to bytes: `[schema_version:1][kind:1][payload:*]`.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(18 + self.payload.len());
+        let mut buf = Vec::with_capacity(2 + self.payload.len());
         buf.push(self.schema_version);
         buf.push(self.kind as u8);
-        buf.extend_from_slice(&self.created_at.to_be_bytes());
-        buf.extend_from_slice(&self.expires_at.to_be_bytes());
         buf.extend_from_slice(&self.payload);
         buf
     }
 
-    /// Deserialize from bytes. Returns None if schema version is unrecognized.
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 18 {
+        if bytes.len() < 2 {
             return None;
         }
-        let schema_version = bytes[0];
-        if schema_version != SCHEMA_VERSION {
+        if bytes[0] != SCHEMA_VERSION {
             return None;
         }
         let kind = RecordKind::from_u8(bytes[1])?;
-        let created_at = u64::from_be_bytes(bytes[2..10].try_into().ok()?);
-        let expires_at = u64::from_be_bytes(bytes[10..18].try_into().ok()?);
-        let payload = bytes[18..].to_vec();
+        let payload = bytes[2..].to_vec();
         Some(Self {
-            schema_version,
+            schema_version: SCHEMA_VERSION,
             kind,
-            created_at,
-            expires_at,
             payload,
         })
     }
@@ -144,8 +98,8 @@ pub enum LookupPayload {
 }
 
 impl LookupPayload {
-    pub fn serialize(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("LookupPayload serialization is infallible")
+    pub fn serialize(&self) -> Option<Vec<u8>> {
+        postcard::to_allocvec(self).ok()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
@@ -160,8 +114,8 @@ pub struct AttrPayload {
 }
 
 impl AttrPayload {
-    pub fn serialize(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("AttrPayload serialization is infallible")
+    pub fn serialize(&self) -> Option<Vec<u8>> {
+        postcard::to_allocvec(self).ok()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
@@ -186,8 +140,8 @@ pub struct DirentsPayload {
 }
 
 impl DirentsPayload {
-    pub fn serialize(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("DirentsPayload serialization is infallible")
+    pub fn serialize(&self) -> Option<Vec<u8>> {
+        postcard::to_allocvec(self).ok()
     }
 
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {

@@ -26,11 +26,6 @@ struct AuthInjector {
     header_value: Option<String>,
 }
 
-enum CredentialSetting {
-    NotConfigured,
-    Configured(Option<String>),
-}
-
 impl AuthManager {
     pub fn none() -> Self {
         Self { injectors: vec![] }
@@ -53,80 +48,66 @@ impl AuthManager {
     fn build_injector(config: &AuthConfig) -> Result<AuthInjector, AuthError> {
         match config.auth_type.as_str() {
             "bearer-token" => {
-                let token = match read_credential(config) {
-                    CredentialSetting::Configured(token) => token,
-                    CredentialSetting::NotConfigured => {
-                        return Err(AuthError::CredentialSourceMissing(
-                            "token_env or token_file required for bearer-token".to_string(),
-                        ));
-                    }
-                };
+                let header_value = read_credential(config).map(|token| format!("Bearer {token}"));
                 Ok(AuthInjector {
                     domain: config.domain.clone(),
                     header_name: "Authorization".to_string(),
-                    header_value: token.map(|token| format!("Bearer {token}")),
+                    header_value,
                 })
-            }
+            },
             "api-key-header" => {
-                let key = match read_credential(config) {
-                    CredentialSetting::Configured(key) => key,
-                    CredentialSetting::NotConfigured => {
-                        return Err(AuthError::CredentialSourceMissing(
-                            "token_env or token_file required for api-key-header".to_string(),
-                        ));
-                    }
-                };
+                let header_value = read_credential(config);
                 let header = config.header.as_deref().unwrap_or("X-API-Key");
                 Ok(AuthInjector {
                     domain: config.domain.clone(),
                     header_name: header.to_string(),
-                    header_value: key,
+                    header_value,
                 })
-            }
+            },
             other => Err(AuthError::UnsupportedType(other.to_string())),
         }
     }
 
-    pub fn headers_for_url(&self, url: &str) -> Vec<(String, String)> {
+    fn injectors_for_url<'a>(&'a self, url: &str) -> impl Iterator<Item = &'a AuthInjector> + 'a {
         let host = url::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(String::from));
         self.injectors
             .iter()
-            .filter(|inj| match (&inj.domain, &host) {
+            .filter(move |inj| match (&inj.domain, &host) {
                 (Some(d), Some(h)) => d == h,
                 (None, _) => true,
                 _ => false,
             })
+    }
+
+    pub fn headers_for_url(&self, url: &str) -> Vec<(String, String)> {
+        self.injectors_for_url(url)
             .filter_map(|inj| Some((inj.header_name.clone(), inj.header_value.as_ref()?.clone())))
             .collect()
     }
 
     pub fn requires_auth_for_url(&self, url: &str) -> bool {
-        let host = url::Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from));
-        self.injectors.iter().any(|inj| match (&inj.domain, &host) {
-            (Some(d), Some(h)) => d == h,
-            (None, _) => true,
-            _ => false,
-        })
+        self.injectors_for_url(url).next().is_some()
     }
 }
 
-fn read_credential(config: &AuthConfig) -> CredentialSetting {
-    if let Some(path) = config.token_file.as_deref() {
-        let token_from_file = std::fs::read_to_string(path)
-            .ok()
-            .map(|contents| contents.trim().to_string())
-            .filter(|contents| !contents.is_empty());
-        if token_from_file.is_some() {
-            return CredentialSetting::Configured(token_from_file);
-        }
-    }
-
-    match config.token_env.as_deref() {
-        Some(env_var) => CredentialSetting::Configured(std::env::var(env_var).ok()),
-        None => CredentialSetting::NotConfigured,
-    }
+fn read_credential(config: &AuthConfig) -> Option<String> {
+    config
+        .token_file
+        .as_deref()
+        .and_then(|path| {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|contents| contents.trim().to_string())
+                .filter(|contents| !contents.is_empty())
+        })
+        .or_else(|| {
+            config
+                .token_env
+                .as_deref()
+                .and_then(|env_var| std::env::var(env_var).ok())
+                .map(|token| token.trim().to_string())
+                .filter(|token| !token.is_empty())
+        })
 }

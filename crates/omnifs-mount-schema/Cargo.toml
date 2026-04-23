@@ -1,0 +1,24 @@
+[package]
+name = "omnifs-mount-schema"
+version = "0.1.0"
+edition = "2024"
+description = "Wire types for the omnifs.provider-manifest.v1 custom section"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+anyhow = "1"
+wasmparser = "0.246"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

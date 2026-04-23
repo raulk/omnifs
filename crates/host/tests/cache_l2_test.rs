@@ -1,5 +1,5 @@
 use omnifs_host::cache::l2::BrowseCacheL2;
-use omnifs_host::cache::{CacheRecord, RecordKind, ttl};
+use omnifs_host::cache::{CacheRecord, RecordKind};
 
 #[test]
 fn l2_put_get_metadata() {
@@ -7,11 +7,7 @@ fn l2_put_get_metadata() {
     let db_path = dir.path().join("browse.redb");
     let l2 = BrowseCacheL2::open(&db_path).unwrap();
 
-    let record = CacheRecord::new(
-        RecordKind::Attr,
-        ttl::ATTR,
-        vec![1, 0, 0, 0, 0, 0, 0, 0, 42],
-    );
+    let record = CacheRecord::new(RecordKind::Attr, vec![1, 0, 0, 0, 0, 0, 0, 0, 42]);
     l2.put(
         "owner/repo/_issues/_open/1/title",
         RecordKind::Attr,
@@ -36,33 +32,12 @@ fn l2_get_miss() {
 }
 
 #[test]
-fn l2_expired_record_returns_none() {
-    let dir = tempfile::tempdir().unwrap();
-    let l2 = BrowseCacheL2::open(&dir.path().join("browse.redb")).unwrap();
-
-    // Create an already-expired record.
-    let record = CacheRecord {
-        schema_version: 1,
-        kind: RecordKind::Lookup,
-        created_at: 0,
-        expires_at: 1, // expired in 1970
-        payload: vec![0],
-    };
-    l2.put("expired/path", RecordKind::Lookup, &record).unwrap();
-    assert!(
-        l2.get("expired/path", RecordKind::Lookup)
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
 fn l2_file_small_goes_to_content_table() {
     let dir = tempfile::tempdir().unwrap();
     let l2 = BrowseCacheL2::open(&dir.path().join("browse.redb")).unwrap();
 
     let small = vec![0u8; 1024]; // 1 KiB, below 64 KiB threshold
-    let record = CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, small.clone());
+    let record = CacheRecord::new(RecordKind::File, small.clone());
     l2.put("path/to/title", RecordKind::File, &record).unwrap();
 
     let got = l2.get("path/to/title", RecordKind::File).unwrap().unwrap();
@@ -75,7 +50,7 @@ fn l2_file_large_goes_to_bulk_table() {
     let l2 = BrowseCacheL2::open(&dir.path().join("browse.redb")).unwrap();
 
     let large = vec![0u8; 100_000]; // 100 KiB, above 64 KiB threshold
-    let record = CacheRecord::new(RecordKind::File, ttl::BULK_FILE, large.clone());
+    let record = CacheRecord::new(RecordKind::File, large.clone());
     l2.put("path/to/log", RecordKind::File, &record).unwrap();
 
     let got = l2.get("path/to/log", RecordKind::File).unwrap().unwrap();
@@ -91,17 +66,17 @@ fn l2_put_batch() {
         (
             "a/title".to_string(),
             RecordKind::File,
-            CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, b"hello\n".to_vec()),
+            CacheRecord::new(RecordKind::File, b"hello\n".to_vec()),
         ),
         (
             "a/body".to_string(),
             RecordKind::File,
-            CacheRecord::new(RecordKind::File, ttl::PROJECTED_FILE, b"world\n".to_vec()),
+            CacheRecord::new(RecordKind::File, b"world\n".to_vec()),
         ),
         (
             "a".to_string(),
             RecordKind::Attr,
-            CacheRecord::new(RecordKind::Attr, ttl::ATTR, vec![0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            CacheRecord::new(RecordKind::Attr, vec![0, 0, 0, 0, 0, 0, 0, 0, 0]),
         ),
     ];
     l2.put_batch(&records).unwrap();
@@ -109,4 +84,29 @@ fn l2_put_batch() {
     assert!(l2.get("a/title", RecordKind::File).unwrap().is_some());
     assert!(l2.get("a/body", RecordKind::File).unwrap().is_some());
     assert!(l2.get("a", RecordKind::Attr).unwrap().is_some());
+}
+
+#[test]
+fn l2_delete_prefix_respects_segment_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let l2 = BrowseCacheL2::open(&dir.path().join("browse.redb")).unwrap();
+
+    for path in ["owner/repo", "owner/repo/issues", "owner/repobaz"] {
+        l2.put(
+            path,
+            RecordKind::Attr,
+            &CacheRecord::new(RecordKind::Attr, vec![1]),
+        )
+        .unwrap();
+    }
+
+    l2.delete_prefix("owner/repo").unwrap();
+
+    assert!(l2.get("owner/repo", RecordKind::Attr).unwrap().is_none());
+    assert!(
+        l2.get("owner/repo/issues", RecordKind::Attr)
+            .unwrap()
+            .is_none()
+    );
+    assert!(l2.get("owner/repobaz", RecordKind::Attr).unwrap().is_some());
 }

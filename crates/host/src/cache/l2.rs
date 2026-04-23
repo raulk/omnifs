@@ -1,6 +1,7 @@
 //! L2 browse cache: durable, path-keyed, per-provider-instance redb database.
 
 use crate::cache::{CacheRecord, L2_BULK_THRESHOLD, RecordKind};
+use crate::path_prefix::path_prefix_matches;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
 
@@ -81,14 +82,14 @@ impl BrowseCacheL2 {
                     (RecordKind::File, true) => {
                         bulk.insert(key.as_str(), bytes.as_slice())?;
                         content.remove(key.as_str())?; // clear stale small copy
-                    }
+                    },
                     (RecordKind::File, false) => {
                         content.insert(key.as_str(), bytes.as_slice())?;
                         bulk.remove(key.as_str())?; // clear stale large copy
-                    }
+                    },
                     _ => {
                         meta.insert(key.as_str(), bytes.as_slice())?;
-                    }
+                    },
                 }
             }
         }
@@ -105,16 +106,12 @@ impl BrowseCacheL2 {
         let Some(value) = table.get(key)? else {
             return Ok(None);
         };
-        let Some(record) = CacheRecord::deserialize(value.value()) else {
-            return Ok(None); // corrupt or unknown schema version; treat as miss
-        };
-        if record.is_expired() {
-            return Ok(None); // lazy expiry
-        }
-        Ok(Some(record))
+        // Corrupt or unknown schema version is treated as a miss so the
+        // host re-fetches from the provider.
+        Ok(CacheRecord::deserialize(value.value()))
     }
 
-    fn table_for(
+    const fn table_for(
         kind: RecordKind,
         payload_len: usize,
     ) -> TableDefinition<'static, &'static str, &'static [u8]> {
@@ -127,7 +124,39 @@ impl BrowseCacheL2 {
 }
 
 impl BrowseCacheL2 {
-    /// Delete all records whose logical path starts with `prefix`.
+    pub fn delete_exact(&self, path: &str) -> L2Result<usize> {
+        let txn = self.db.begin_write()?;
+        let mut deleted = 0;
+        let keys = [
+            make_key(path, RecordKind::Lookup),
+            make_key(path, RecordKind::Attr),
+            make_key(path, RecordKind::Dirents),
+            make_key(path, RecordKind::File),
+        ];
+
+        {
+            let mut meta = txn.open_table(METADATA_TABLE)?;
+            for key in &keys[..3] {
+                if meta.remove(key.as_str())?.is_some() {
+                    deleted += 1;
+                }
+            }
+            let mut content = txn.open_table(CONTENT_TABLE)?;
+            if content.remove(keys[3].as_str())?.is_some() {
+                deleted += 1;
+            }
+            let mut bulk = txn.open_table(BULK_TABLE)?;
+            if bulk.remove(keys[3].as_str())?.is_some() {
+                deleted += 1;
+            }
+        }
+
+        txn.commit()?;
+        Ok(deleted)
+    }
+
+    /// Delete all records whose logical path is equal to `prefix` or lies
+    /// beneath it on a segment boundary.
     ///
     /// The stored key format is `{kind_char}:{path}`, so we scan each table
     /// for keys matching `L:{prefix}`, `A:{prefix}`, `D:{prefix}`, `F:{prefix}`
@@ -155,7 +184,13 @@ impl BrowseCacheL2 {
                 let range = table.range::<&str>(scan_prefix.as_str()..range_end.as_str())?;
                 for entry in range {
                     let entry = entry?;
-                    to_delete.push(entry.0.value().to_string());
+                    let key = entry.0.value().to_string();
+                    let path = key
+                        .split_once(':')
+                        .map_or("", |(_, logical_path)| logical_path);
+                    if path_prefix_matches(prefix, path) {
+                        to_delete.push(key);
+                    }
                 }
             }
             for key in &to_delete {

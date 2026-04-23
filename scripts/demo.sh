@@ -79,6 +79,50 @@ act() {
     sleep 1
 }
 
+pick_first_child() {
+    local dir=$1
+    local attempt=""
+    local child=""
+
+    for attempt in {1..20}; do
+        child=$(command ls -1 "$dir" 2>/dev/null | head -n 1)
+        if [[ -n ${child} ]]; then
+            print -r -- "$child"
+            return 0
+        fi
+        sleep 0.2
+    done
+
+    return 1
+}
+
+pick_first_child_with_file() {
+    local dir=$1
+    local wanted=$2
+    local child=""
+    local attempt=""
+
+    for attempt in {1..20}; do
+        while IFS= read -r child; do
+            [[ -z ${child} ]] && continue
+            if [[ -f "${dir}/${child}/${wanted}" ]]; then
+                print -r -- "$child"
+                return 0
+            fi
+        done < <(command ls -1 "$dir" 2>/dev/null)
+
+        sleep 0.2
+    done
+
+    child=$(pick_first_child "$dir")
+    if [[ -n ${child} ]]; then
+        print -r -- "$child"
+        return 0
+    fi
+
+    return 1
+}
+
 run_smoke_demo() {
     set -euo pipefail
 
@@ -150,6 +194,9 @@ if [[ ${OMNIFS_DEMO_MODE:-full} == smoke ]]; then
     exit 0
 fi
 
+demo_owner=${OMNIFS_DEMO_OWNER:-raulk}
+demo_repo=${OMNIFS_DEMO_REPO:-omnifs}
+
 clear
 sleep 1
 
@@ -168,19 +215,19 @@ for humans. for agents."
 type_and_run "cd /github" 0.3
 type_and_run "ls -lrt" 0
 type_and_run "# nothing here... yet!" 0.5
-type_and_run "cd NousResearch" 0.3
+type_and_run "cd ${demo_owner}" 0.3
 type_and_run "ls" 2
 
 # act 2: source code
 
-act "source code, automatically checked out
-the repo is cloned lazily on first access. git just works."
+act "source code, mounted as a real tree
+the repo materializes lazily on first access. open files directly."
 
-type_and_run "cd hermes-agent" 0.1
+type_and_run "cd ${demo_repo}" 0.1
 type_and_run "ls"
 type_and_run "cd _repo" 0.3
 type_and_run "ls" 0.8
-type_and_run "git --no-pager log --oneline -n 1" 1
+type_and_run "bat README.md | head -40" 1
 type_and_run_fast "cd .."
 
 # act 3: issues
@@ -192,9 +239,14 @@ type_and_run "cd _issues" 0.5
 type_and_run "ls" 0.6
 type_and_run "cd _open" 0.3
 type_and_run "ls" 0.8
-type_and_run "cd 3926" 0.3
+issue_open_dir="${PWD}"
+issue_with_body=$(pick_first_child_with_file "$issue_open_dir" body)
+[[ -n ${issue_with_body} ]]
+type_and_run "cd ${issue_with_body}" 0.3
 type_and_run "bat title" 0.5
-type_and_run "bat -l md body" 1.5
+if [[ -f body ]]; then
+    type_and_run "bat -l md body" 1.5
+fi
 type_and_run "cd .." 0.3
 type_and_run_fast 'rg -in memory */title */body --heading --color=always' 2
 type_and_run_fast 'cd ../..'
@@ -208,7 +260,11 @@ type_and_run "cd _prs" 0.5
 type_and_run "ls" 0.5
 type_and_run "cd _open" 0.3
 type_and_run "ls" 0.8
-type_and_run "cd 7226" 0.3
+pr_open_dir="${PWD}"
+pr_with_diff=$(pick_first_child "$pr_open_dir")
+[[ -n ${pr_with_diff} ]]
+type_and_run "cd ${pr_with_diff}" 0.3
+type_and_run "ls" 0.5
 type_and_run "bat title" 0.5
 type_and_run "bat state" 0.3
 type_and_run "bat diff" 2
@@ -219,9 +275,14 @@ type_and_run_fast "cd ../../.."
 act "even GitHub Actions runs
 why open a browser when you can cat a CI log directly?"
 
-type_and_run "cd _actions/runs" 0.3
+type_and_run "cd _actions" 0.3
+type_and_run "ls" 0.5
+type_and_run "cd runs" 0.3
 type_and_run "ls" 0.8
-type_and_run "cd 24264068866" 0.3
+run_dir="${PWD}"
+first_run=$(pick_first_child "$run_dir")
+[[ -n ${first_run} ]]
+type_and_run "cd ${first_run}" 0.3
 type_and_run "ls" 0.8
 type_and_run "bat status" 0.3
 type_and_run "bat conclusion" 0.5

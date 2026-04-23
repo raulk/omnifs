@@ -1,4 +1,7 @@
 use omnifs_host::runtime::correlation::CorrelationTracker;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::thread;
 
 #[test]
 fn test_allocate_unique_ids() {
@@ -9,32 +12,34 @@ fn test_allocate_unique_ids() {
 }
 
 #[test]
-fn test_track_and_resolve_pending() {
-    let tracker = CorrelationTracker::new();
-    let id = tracker.allocate();
-    tracker.mark_pending(id, "list_children".to_string());
-    assert!(tracker.is_pending(id));
-    tracker.resolve(id);
-    assert!(!tracker.is_pending(id));
-}
-
-#[test]
-fn test_cancel_removes_pending() {
-    let tracker = CorrelationTracker::new();
-    let id = tracker.allocate();
-    tracker.mark_pending(id, "lookup".to_string());
-    tracker.cancel(id);
-    assert!(!tracker.is_pending(id));
-}
-
-#[test]
-fn test_pending_count() {
+fn test_allocate_ids_without_pending_map() {
     let tracker = CorrelationTracker::new();
     let id1 = tracker.allocate();
     let id2 = tracker.allocate();
-    tracker.mark_pending(id1, "a".to_string());
-    tracker.mark_pending(id2, "b".to_string());
-    assert_eq!(tracker.pending_count(), 2);
-    tracker.resolve(id1);
-    assert_eq!(tracker.pending_count(), 1);
+    assert!(id2 > id1);
+}
+
+#[test]
+fn test_allocate_ids_are_unique_across_threads() {
+    let tracker = Arc::new(CorrelationTracker::new());
+    let mut handles = Vec::new();
+    let thread_count = 8;
+    let ids_per_thread = 256;
+
+    for _ in 0..thread_count {
+        let tracker = Arc::clone(&tracker);
+        handles.push(thread::spawn(move || {
+            (0..ids_per_thread)
+                .map(|_| tracker.allocate())
+                .collect::<Vec<_>>()
+        }));
+    }
+
+    let mut ids = Vec::with_capacity(thread_count * ids_per_thread);
+    for handle in handles {
+        ids.extend(handle.join().expect("thread should allocate IDs"));
+    }
+
+    let unique: HashSet<_> = ids.iter().copied().collect();
+    assert_eq!(unique.len(), ids.len());
 }
