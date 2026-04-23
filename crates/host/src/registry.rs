@@ -1,11 +1,11 @@
 //! Provider registry: loading and lifecycle management for WASM providers.
 //!
-//! Scans the providers directory, instantiates providers via `EffectRuntime`,
+//! Scans the providers directory, instantiates providers via `CalloutRuntime`,
 //! and manages timer-driven refresh tasks.
 
 use crate::config::InstanceConfig;
-use crate::runtime::EffectRuntime;
 use crate::runtime::cloner::GitCloner;
+use crate::runtime::{CalloutRuntime, RuntimeError};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use tokio::sync::watch;
 pub struct ProviderRegistry {
     #[allow(dead_code)] // stored for future use (hot-reloading providers)
     engine: wasmtime::Engine,
-    instances: HashMap<String, Arc<EffectRuntime>>,
+    instances: HashMap<String, Arc<CalloutRuntime>>,
     root_mount: Option<String>,
     timer_shutdown: watch::Sender<bool>,
     timer_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -55,7 +55,7 @@ impl ProviderRegistry {
         for entry in std::fs::read_dir(&providers_dir).map_err(RegistryError::ScanFailed)? {
             let entry = entry.map_err(RegistryError::ScanFailed)?;
             let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "toml") {
+            if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
 
@@ -82,10 +82,11 @@ impl ProviderRegistry {
                     }
                     tracing::info!(mount = mount, file = %path.display(), root = is_root, "loaded provider");
                     instances.insert(mount, Arc::new(runtime));
-                }
+                },
+                Err(e @ RegistryError::ConfigError(_)) => return Err(e),
                 Err(e) => {
                     tracing::warn!(file = %path.display(), error = %e, "skipping provider");
-                }
+                },
             }
         }
 
@@ -105,7 +106,7 @@ impl ProviderRegistry {
         plugin_dir: &Path,
         cloner: &Arc<GitCloner>,
         cache_dir: &Path,
-    ) -> Result<(String, bool, EffectRuntime), RegistryError> {
+    ) -> Result<(String, bool, CalloutRuntime), RegistryError> {
         let config = InstanceConfig::from_file(config_path)
             .map_err(|e| RegistryError::ConfigError(e.to_string()))?;
 
@@ -117,7 +118,7 @@ impl ProviderRegistry {
         }
 
         let is_root = config.root_mount;
-        let runtime = EffectRuntime::new(
+        let runtime = CalloutRuntime::new(
             engine,
             &wasm_path,
             &config,
@@ -125,17 +126,30 @@ impl ProviderRegistry {
             cache_dir,
             &config.mount,
         )
-        .map_err(|e| RegistryError::RuntimeError(e.to_string()))?;
+        .map_err(|e| match e {
+            RuntimeError::InvalidConfig(message) => RegistryError::ConfigError(format!(
+                "config file {}: {message}",
+                config_path.display()
+            )),
+            other => RegistryError::RuntimeError(other.to_string()),
+        })?;
 
-        Ok((config.mount.clone(), is_root, runtime))
+        Ok((config.mount, is_root, runtime))
     }
 
-    pub fn get(&self, mount: &str) -> Option<&Arc<EffectRuntime>> {
+    pub fn get(&self, mount: &str) -> Option<&Arc<CalloutRuntime>> {
         self.instances.get(mount)
     }
 
     pub fn mounts(&self) -> Vec<String> {
         self.instances.keys().cloned().collect()
+    }
+
+    pub fn runtime_entries(&self) -> Vec<(String, Arc<CalloutRuntime>)> {
+        self.instances
+            .iter()
+            .map(|(mount, runtime)| (mount.clone(), Arc::clone(runtime)))
+            .collect()
     }
 
     /// Returns the mount name of the root-mounted provider, if any.
@@ -167,7 +181,7 @@ impl ProviderRegistry {
                 Err(e) => {
                     tracing::warn!(mount, error = %e, "failed to read provider capabilities");
                     continue;
-                }
+                },
             };
             if interval_secs == 0 {
                 continue;
@@ -207,4 +221,71 @@ pub enum RegistryError {
     PluginNotFound(String),
     #[error("runtime error: {0}")]
     RuntimeError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderRegistry, RegistryError};
+    use crate::runtime::cloner::GitCloner;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    fn test_provider_wasm_path() -> PathBuf {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("host crate must have a workspace parent")
+            .parent()
+            .expect("workspace root must exist");
+        workspace_root
+            .join("target")
+            .join("wasm32-wasip2")
+            .join("release")
+            .join("test_provider.wasm")
+    }
+
+    #[test]
+    fn load_fails_on_invalid_provider_config() {
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let cache_dir = tempfile::tempdir().expect("temp cache dir");
+        let plugin_dir = tempfile::tempdir().expect("temp plugin dir");
+        let providers_dir = config_dir.path().join("providers");
+        std::fs::create_dir_all(&providers_dir).expect("create providers dir");
+
+        let provider_wasm = test_provider_wasm_path();
+        assert!(
+            provider_wasm.exists(),
+            "test provider missing at {}. Run `just build-providers` first.",
+            provider_wasm.display()
+        );
+        std::fs::copy(&provider_wasm, plugin_dir.path().join("test_provider.wasm"))
+            .expect("copy test provider");
+
+        std::fs::write(
+            providers_dir.join("invalid.json"),
+            r#"{
+                "plugin": "test_provider.wasm",
+                "mount": "test",
+                "config": {
+                    "unexpected": true
+                }
+            }"#,
+        )
+        .expect("write provider config");
+
+        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")));
+        match ProviderRegistry::load(
+            config_dir.path(),
+            plugin_dir.path(),
+            &cloner,
+            cache_dir.path(),
+        ) {
+            Err(RegistryError::ConfigError(message)) => {
+                assert!(message.contains("failed validation"));
+                assert!(message.contains("invalid.json"));
+                assert!(message.contains("mount test"));
+            },
+            Err(other) => panic!("expected config error, got {other}"),
+            Ok(_) => panic!("expected invalid provider config to abort load"),
+        }
+    }
 }

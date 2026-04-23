@@ -6,10 +6,11 @@
 //! the FUSE passthrough only reads the HEAD working tree.
 
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CLONE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -80,7 +81,7 @@ impl GitCloner {
             .entry(cache_key.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
-        let _guard = lock.lock().expect("clone lock poisoned");
+        let _guard = lock.lock();
 
         // Check sidecar binding: if a .omnifs-clone-url file exists,
         // verify it matches the requested clone_url.
@@ -140,7 +141,7 @@ impl GitCloner {
                                 retained.extend_from_slice(&discard[..n.min(remaining)]);
                             }
                             // Keep reading to drain the pipe even after cap.
-                        }
+                        },
                     }
                 }
             }
@@ -158,7 +159,7 @@ impl GitCloner {
                     let _ = std::fs::remove_dir_all(dest);
                     tracing::warn!(url, %status, stderr = %stderr, "git clone failed");
                     return Err(CloneError::Failed { status, stderr });
-                }
+                },
                 Ok(None) => {
                     if start.elapsed() > CLONE_TIMEOUT {
                         let _ = child.kill();
@@ -170,11 +171,11 @@ impl GitCloner {
                         });
                     }
                     std::thread::sleep(Duration::from_millis(500));
-                }
+                },
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(dest);
                     return Err(CloneError::Spawn(e));
-                }
+                },
             }
         }
     }

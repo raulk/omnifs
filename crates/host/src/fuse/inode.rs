@@ -5,6 +5,7 @@
 
 use crate::fuse::FuseFs;
 use crate::omnifs::provider::types::EntryKind;
+use crate::path_key::PathKey;
 use fuser::{FileAttr, FileType, INodeNo};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -70,7 +71,7 @@ impl FuseFs {
         size: u64,
         backing_path: Option<PathBuf>,
     ) -> u64 {
-        let key = (mount_name.to_string(), path.to_string());
+        let key = PathKey::new(mount_name, path);
         // Use entry API to atomically check-or-insert, avoiding a race where
         // two concurrent lookups for the same (mount, path) allocate different inodes.
         // Use and_modify to update kind/size on existing entries (stale inode fix).

@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 /// Configuration for a provider instance.
 ///
-/// Loaded from TOML files in the providers configuration directory.
+/// Loaded from JSON files in the providers configuration directory.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InstanceConfig {
     pub plugin: String,
@@ -20,7 +20,7 @@ pub struct InstanceConfig {
     pub auth: Vec<AuthConfig>,
     pub capabilities: Option<CapabilitiesConfig>,
     #[serde(rename = "config")]
-    pub config_raw: Option<toml::Value>,
+    pub config_raw: Option<serde_json::Value>,
 }
 
 /// Accepts both `[auth]` (single table) and `[[auth]]` (array of tables).
@@ -63,8 +63,8 @@ pub struct CapabilitiesConfig {
 }
 
 impl InstanceConfig {
-    pub fn parse(s: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(s)
+    pub fn parse(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Self, ConfigError> {
@@ -74,10 +74,10 @@ impl InstanceConfig {
     }
 
     pub fn config_bytes(&self) -> Vec<u8> {
-        match &self.config_raw {
-            Some(value) => toml::to_string(value).unwrap_or_default().into_bytes(),
-            None => Vec::new(),
-        }
+        self.config_raw.as_ref().map_or_else(
+            || b"{}".to_vec(),
+            |value| serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec()),
+        )
     }
 }
 
@@ -86,5 +86,5 @@ pub enum ConfigError {
     #[error("failed to read config file {0}: {1}")]
     ReadFailed(String, std::io::Error),
     #[error("failed to parse config file {0}: {1}")]
-    ParseFailed(String, toml::de::Error),
+    ParseFailed(String, serde_json::Error),
 }

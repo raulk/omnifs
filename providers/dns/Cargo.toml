@@ -11,12 +11,13 @@ homepage = "https://github.com/raulk/omnifs"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-wit-bindgen = "0.41"
-hashbrown = { version = "0.15", features = ["serde"] }
+base64 = "0.22"
+omnifs-sdk = { path = "../../crates/omnifs-sdk" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strum = { version = "0.27", features = ["derive"] }
-toml = "0.8"
+hickory-proto = "0.26"
+num_enum = { version = "0.7.5", default-features = false }
 
 [package.metadata.component]
 package = "omnifs:provider"
@@ -39,3 +40,5 @@ wildcard_imports = "allow"
 too_many_lines = "allow"
 trivially_copy_pass_by_ref = "allow"
 match_same_arms = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"

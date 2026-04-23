@@ -13,8 +13,8 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonschema = { workspace = true }
 postcard = { workspace = true }
-toml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
@@ -28,6 +28,8 @@ url = "2"
 wasmtime-wasi = "43"
 redb = { workspace = true }
 moka = { workspace = true }
+omnifs-mount-schema = { path = "../omnifs-mount-schema" }
+wasmparser = "0.246"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = "0.17"

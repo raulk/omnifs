@@ -1,32 +1,163 @@
-wit_bindgen::generate!({
-    path: "../../wit",
-    world: "provider",
-});
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
-#[allow(dead_code)]
-type ProviderResult<T> = Result<T, String>;
+use omnifs_sdk::Cx;
+use omnifs_sdk::prelude::*;
+#[config]
+struct Config {}
 
-struct TestProvider;
+#[derive(Clone)]
+struct State;
 
-impl exports::omnifs::provider::lifecycle::Guest for TestProvider {
-    fn initialize(_config: Vec<u8>) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        ProviderResponse::Done(ActionResult::ProviderInitialized(ProviderInfo {
-            name: "test-provider".to_string(),
-            version: "0.1.0".to_string(),
-            description: "A test provider with canned data".to_string(),
-        }))
+mod root_handlers {
+    use super::*;
+
+    pub struct RootHandlers;
+
+    #[handlers]
+    impl RootHandlers {
+        #[dir("/")]
+        fn root(_cx: &DirCx<'_, State>) -> Result<Projection> {
+            let mut projection = Projection::new();
+            projection.page(PageStatus::Exhaustive);
+            Ok(projection)
+        }
+    }
+}
+
+mod hello_handlers {
+    use super::*;
+
+    fn hello_listing() -> Projection {
+        let mut projection = Projection::new();
+        projection.file("message");
+        projection.file("greeting");
+        projection.file("projected");
+        projection.page(PageStatus::Exhaustive);
+        projection
     }
 
-    fn shutdown() {}
-
-    fn get_config_schema() -> omnifs::provider::types::ConfigSchema {
-        omnifs::provider::types::ConfigSchema { fields: vec![] }
+    fn projected_file(name: &str) -> Result<Projection> {
+        let mut projection = Projection::new();
+        match name {
+            "message" => projection.file_with_content("message", b"Hello, world!"),
+            "greeting" => projection.file_with_content("greeting", b"Hi there!\n"),
+            "projected" => {
+                projection.file_with_content("projected", b"title\n");
+                projection.file_with_content("body", b"body\n");
+                projection.file_with_content("state", b"open\n");
+            },
+            _ => return Err(ProviderError::not_found("projected file not found")),
+        }
+        Ok(projection)
     }
 
-    fn capabilities() -> omnifs::provider::types::RequestedCapabilities {
-        omnifs::provider::types::RequestedCapabilities {
-            domains: vec!["httpbin.org".to_string()],
+    pub struct HelloHandlers;
+
+    #[handlers]
+    impl HelloHandlers {
+        #[dir("/hello")]
+        #[allow(clippy::needless_pass_by_value, clippy::unused_async)]
+        async fn hello(cx: &DirCx<'_, State>) -> Result<Projection> {
+            match cx.intent() {
+                DirIntent::ReadProjectedFile { name } => match *name {
+                    "message" | "greeting" | "projected" => projected_file(name),
+                    _ => Err(ProviderError::not_found("projected file not found")),
+                },
+                DirIntent::Lookup { .. } => Ok(hello_listing()),
+                DirIntent::List { .. } => {
+                    let mut projection = hello_listing();
+                    projection.preload_many([
+                        ("hello/bundle/title", b"title".to_vec()),
+                        ("hello/bundle/body", b"body".to_vec()),
+                    ]);
+                    Ok(projection)
+                },
+            }
+        }
+
+        #[file("/hello/lazy")]
+        fn lazy(_cx: &Cx<State>) -> Result<FileContent> {
+            Ok(FileContent::bytes("lazy\n"))
+        }
+
+        #[dir("/hello/bundle")]
+        fn bundle(_cx: &DirCx<'_, State>) -> Result<Projection> {
+            let mut projection = Projection::new();
+            projection.file_with_content("title", b"title");
+            projection.file_with_content("body", b"body");
+            projection.page(PageStatus::Exhaustive);
+            Ok(projection)
+        }
+
+        #[dir("/hello/snapshot")]
+        fn snapshot(_cx: &DirCx<'_, State>) -> Result<Projection> {
+            let mut projection = Projection::new();
+            projection.file_with_content("status", b"open\n");
+            projection.page(PageStatus::Exhaustive);
+            Ok(projection)
+        }
+
+        #[dir("/hello/snapshot/comments")]
+        fn snapshot_comments(_cx: &DirCx<'_, State>) -> Result<Projection> {
+            let mut projection = Projection::new();
+            projection.page(PageStatus::Exhaustive);
+            Ok(projection)
+        }
+    }
+}
+
+mod scoped_handlers {
+    use super::*;
+
+    pub struct ScopedHandlers;
+
+    #[handlers]
+    impl ScopedHandlers {
+        #[dir("/scoped")]
+        fn scoped(_cx: &DirCx<'_, State>) -> Result<Projection> {
+            let mut projection = Projection::new();
+            projection.file_with_content("item", b"scoped\n");
+            projection.page(PageStatus::Exhaustive);
+            Ok(projection)
+        }
+    }
+}
+
+mod subtree_handlers {
+    use super::*;
+
+    pub struct SubtreeHandlers;
+
+    #[handlers]
+    impl SubtreeHandlers {
+        #[subtree("/checkout")]
+        fn checkout(_cx: &Cx<State>) -> Result<SubtreeRef> {
+            Ok(SubtreeRef::new(777))
+        }
+    }
+}
+
+#[provider(mounts(
+    crate::root_handlers::RootHandlers,
+    crate::hello_handlers::HelloHandlers,
+    crate::scoped_handlers::ScopedHandlers,
+    crate::subtree_handlers::SubtreeHandlers,
+))]
+impl TestProvider {
+    fn init(_config: Config) -> (State, ProviderInfo) {
+        (
+            State,
+            ProviderInfo {
+                name: "test-provider".into(),
+                version: "0.1.0".into(),
+                description: "A test provider with canned data".into(),
+            },
+        )
+    }
+
+    fn capabilities() -> RequestedCapabilities {
+        RequestedCapabilities {
+            domains: vec!["httpbin.org".into()],
             auth_types: vec![],
             max_memory_mb: 16,
             needs_git: false,
@@ -35,210 +166,18 @@ impl exports::omnifs::provider::lifecycle::Guest for TestProvider {
             refresh_interval_secs: 0,
         }
     }
-}
 
-impl exports::omnifs::provider::browse::Guest for TestProvider {
-    fn lookup_child(
-        _id: u64,
-        parent_path: String,
-        name: String,
-    ) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        let path = if parent_path.is_empty() {
-            name.clone()
-        } else {
-            format!("{parent_path}/{name}")
+    #[allow(clippy::unused_async)]
+    async fn on_event(cx: Cx<State>, event: ProviderEvent) -> Result<EventOutcome> {
+        let ProviderEvent::TimerTick(_) = event else {
+            return Ok(EventOutcome::new());
         };
-        match path.as_str() {
-            "hello" => ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-                name: "hello".to_string(),
-                kind: EntryKind::Directory,
-                size: None,
-                projected_files: None,
-            }))),
-            "hello/message" => {
-                ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-                    name: "message".to_string(),
-                    kind: EntryKind::File,
-                    size: Some(13),
-                    projected_files: None,
-                })))
-            }
-            "hello/greeting" => {
-                ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-                    name: "greeting".to_string(),
-                    kind: EntryKind::File,
-                    size: Some(12),
-                    projected_files: None,
-                })))
-            }
-            "hello/cached" => {
-                ProviderResponse::Done(ActionResult::DirEntryOption(Some(DirEntry {
-                    name: "cached".to_string(),
-                    kind: EntryKind::File,
-                    size: None,
-                    projected_files: None,
-                })))
-            }
-            _ => ProviderResponse::Done(ActionResult::DirEntryOption(None)),
+        let mut outcome = EventOutcome::new();
+        for path in cx.active_paths(crate::scoped_handlers::ScopedPath::MOUNT_ID, |path| {
+            Some(path.to_string())
+        }) {
+            outcome.invalidate_path(format!("{path}/item"));
         }
-    }
-
-    fn list_children(_id: u64, path: String) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        match path.as_str() {
-            "" => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
-                entries: vec![DirEntry {
-                    name: "hello".to_string(),
-                    kind: EntryKind::Directory,
-                    size: None,
-                    projected_files: None,
-                }],
-                exhaustive: true,
-            })),
-            "hello" => ProviderResponse::Done(ActionResult::DirEntries(DirListing {
-                entries: vec![
-                    DirEntry {
-                        name: "message".to_string(),
-                        kind: EntryKind::File,
-                        size: Some(13),
-                        projected_files: None,
-                    },
-                    DirEntry {
-                        name: "greeting".to_string(),
-                        kind: EntryKind::File,
-                        size: Some(12),
-                        projected_files: None,
-                    },
-                ],
-                exhaustive: true,
-            })),
-            _ => ProviderResponse::Done(ActionResult::Err("not found".to_string())),
-        }
-    }
-
-    fn read_file(_id: u64, path: String) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        match path.as_str() {
-            "hello/message" => {
-                ProviderResponse::Done(ActionResult::FileContent(b"Hello, world!".to_vec()))
-            }
-            "hello/greeting" => {
-                ProviderResponse::Done(ActionResult::FileContent(b"Hi there!\n".to_vec()))
-            }
-            // Special path that issues a KV-set then KV-get effect chain to
-            // exercise the host's effect/resume loop.
-            "hello/cached" => ProviderResponse::Effect(SingleEffect::KvSet(KvSetRequest {
-                key: "test:cached".to_string(),
-                value: b"cached-value".to_vec(),
-            })),
-            _ => ProviderResponse::Done(ActionResult::Err("not found".to_string())),
-        }
-    }
-
-    fn open_file(_id: u64, _path: String) -> omnifs::provider::types::ProviderResponse {
-        omnifs::provider::types::ProviderResponse::Done(
-            omnifs::provider::types::ActionResult::FileOpened(1),
-        )
-    }
-
-    fn read_chunk(
-        _id: u64,
-        _handle: u64,
-        _offset: u64,
-        _len: u32,
-    ) -> omnifs::provider::types::ProviderResponse {
-        omnifs::provider::types::ProviderResponse::Done(
-            omnifs::provider::types::ActionResult::FileChunk(vec![]),
-        )
-    }
-
-    fn close_file(_handle: u64) {}
-}
-
-impl exports::omnifs::provider::resume::Guest for TestProvider {
-    fn resume(
-        _id: u64,
-        effect_outcome: omnifs::provider::types::EffectResult,
-    ) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-
-        let result = match &effect_outcome {
-            EffectResult::Single(r) => r,
-            EffectResult::Batch(v) if !v.is_empty() => &v[0],
-            EffectResult::Batch(_) => {
-                return ProviderResponse::Done(ActionResult::Err(
-                    "unexpected batch result".to_string(),
-                ));
-            }
-        };
-
-        match result {
-            // After KV-set completes, issue a KV-get to read it back.
-            SingleEffectResult::KvOk => {
-                ProviderResponse::Effect(SingleEffect::KvGet("test:cached".to_string()))
-            }
-            // After KV-get completes, return the value as file content.
-            SingleEffectResult::KvValue(Some(data)) => {
-                ProviderResponse::Done(ActionResult::FileContent(data.clone()))
-            }
-            SingleEffectResult::KvValue(None) => {
-                ProviderResponse::Done(ActionResult::FileContent(b"no-cached-value".to_vec()))
-            }
-            _ => ProviderResponse::Done(ActionResult::Err("unexpected resume".to_string())),
-        }
-    }
-
-    fn cancel(_id: u64) {}
-}
-
-impl exports::omnifs::provider::reconcile::Guest for TestProvider {
-    fn plan_mutations(
-        _id: u64,
-        _changes: Vec<omnifs::provider::types::FileChange>,
-    ) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        ProviderResponse::Done(ActionResult::Err(
-            "mutations are not implemented".to_string(),
-        ))
-    }
-
-    fn execute(
-        _id: u64,
-        _mutation: omnifs::provider::types::PlannedMutation,
-    ) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        ProviderResponse::Done(ActionResult::Err(
-            "mutations are not implemented".to_string(),
-        ))
-    }
-
-    fn fetch_resource(
-        _id: u64,
-        _resource_path: String,
-    ) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        ProviderResponse::Done(ActionResult::Err(
-            "fetch_resource is not implemented".to_string(),
-        ))
-    }
-
-    fn list_scope(_id: u64, _scope: String) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        ProviderResponse::Done(ActionResult::Err(
-            "list_scope is not implemented".to_string(),
-        ))
+        Ok(outcome)
     }
 }
-
-impl exports::omnifs::provider::notify::Guest for TestProvider {
-    fn on_event(
-        _id: u64,
-        _event: omnifs::provider::types::ProviderEvent,
-    ) -> omnifs::provider::types::ProviderResponse {
-        use omnifs::provider::types::*;
-        ProviderResponse::Done(ActionResult::Ok)
-    }
-}
-
-export!(TestProvider);

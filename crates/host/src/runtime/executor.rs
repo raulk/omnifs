@@ -1,13 +1,17 @@
-//! Effect request/response types and HTTP executor.
+//! Callout request/response types and HTTP executor.
 //!
-//! Defines the internal effect protocol between the host and providers,
-//! including HTTP fetch, KV operations, and Git effects.
+//! Defines the internal protocol between the host and providers for
+//! running a single callout. Only HTTP fetch and git-open-repo are live
+//! today; the remaining host-side git operations happen through bind
+//! mounts over the cloned repo directory.
 
 use crate::auth::AuthManager;
 use crate::runtime::capability::CapabilityChecker;
-use std::collections::HashMap;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -19,28 +23,14 @@ pub enum ErrorKind {
     Internal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitEntryKind {
-    Blob,
-    Tree,
-    Commit,
-}
-
 #[derive(Debug, Clone)]
-pub enum EffectResponse {
+pub enum CalloutResponse {
     HttpResponse {
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     },
-    KvValue(Option<Vec<u8>>),
-    KvOk,
-    KvKeys(Vec<String>),
     GitRepoOpened(u64),
-    GitTreeEntries(Vec<GitTreeEntryData>),
-    GitBlobData(Vec<u8>),
-    GitRef(String),
-    GitCachedRepos(Vec<GitCachedRepoData>),
     Error {
         kind: ErrorKind,
         message: String,
@@ -48,38 +38,27 @@ pub enum EffectResponse {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct GitTreeEntryData {
-    pub name: String,
-    pub mode: u32,
-    pub oid: String,
-    pub kind: GitEntryKind,
-}
-
-#[derive(Debug, Clone)]
-pub struct GitCachedRepoData {
-    pub cache_key: String,
-}
-
-pub(crate) struct HttpExecutor {
+pub struct HttpExecutor {
     client: reqwest::Client,
     auth: Arc<AuthManager>,
     capability: Arc<CapabilityChecker>,
 }
 
 impl HttpExecutor {
-    pub fn new(auth: Arc<AuthManager>, capability: Arc<CapabilityChecker>) -> Self {
+    pub fn new(
+        auth: Arc<AuthManager>,
+        capability: Arc<CapabilityChecker>,
+    ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .user_agent("omnifs")
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("reqwest client");
-        Self {
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        Ok(Self {
             client,
             auth,
             capability,
-        }
+        })
     }
 
     pub async fn execute_fetch(
@@ -88,9 +67,9 @@ impl HttpExecutor {
         url: &str,
         headers: &[(String, String)],
         body: Option<&[u8]>,
-    ) -> EffectResponse {
+    ) -> CalloutResponse {
         if let Err(e) = self.capability.check_url(url) {
-            return EffectResponse::Error {
+            return CalloutResponse::Error {
                 kind: ErrorKind::Denied,
                 message: e.to_string(),
                 retryable: false,
@@ -99,15 +78,15 @@ impl HttpExecutor {
 
         let auth_headers = self.auth.headers_for_url(url);
         if auth_headers.is_empty() && self.auth.requires_auth_for_url(url) {
-            return EffectResponse::HttpResponse {
-                status: 401,
-                headers: Vec::new(),
-                body: Vec::new(),
+            return CalloutResponse::Error {
+                kind: ErrorKind::Denied,
+                message: format!("no credentials for {url}"),
+                retryable: false,
             };
         }
 
         let Ok(reqwest_method) = reqwest::Method::from_str(method) else {
-            return EffectResponse::Error {
+            return CalloutResponse::Error {
                 kind: ErrorKind::Denied,
                 message: format!("unsupported HTTP method: {method}"),
                 retryable: false,
@@ -115,43 +94,39 @@ impl HttpExecutor {
         };
 
         let mut req = self.client.request(reqwest_method, url);
-
-        // TODO: use HeaderMap::try_from(HashMap).
-        for (name, value) in &auth_headers {
-            req = req.header(name.as_str(), value.as_str());
-        }
-        // TODO: use HeaderMap::try_from(HashMap).
-        for (name, value) in headers {
-            req = req.header(name.as_str(), value.as_str());
-        }
+        let header_map = match build_header_map(&auth_headers, headers) {
+            Ok(header_map) => header_map,
+            Err(message) => {
+                return CalloutResponse::Error {
+                    kind: ErrorKind::Internal,
+                    message,
+                    retryable: false,
+                };
+            },
+        };
+        req = req.headers(header_map);
         if let Some(body) = body {
-            // TODO: is to_vec necessary?
-            req = req.body(body.to_vec());
+            req = req.body(owned_body(body));
         }
 
         match req.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
-                // TODO: feels sloppy.
-                let resp_headers: Vec<(String, String)> = response
-                    .headers()
-                    .iter()
-                    .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                    .collect();
+                let resp_headers = response_headers(response.headers());
                 match response.bytes().await {
-                    Ok(body) => EffectResponse::HttpResponse {
+                    Ok(body) => CalloutResponse::HttpResponse {
                         status,
                         headers: resp_headers,
                         body: body.to_vec(),
                     },
-                    Err(e) => EffectResponse::Error {
+                    Err(e) => CalloutResponse::Error {
                         kind: ErrorKind::Network,
                         message: e.to_string(),
                         retryable: true,
                     },
                 }
-            }
-            Err(e) => EffectResponse::Error {
+            },
+            Err(e) => CalloutResponse::Error {
                 kind: ErrorKind::Network,
                 message: e.to_string(),
                 retryable: true,
@@ -160,41 +135,80 @@ impl HttpExecutor {
     }
 }
 
-pub(crate) struct MemoryKvExecutor {
-    store: parking_lot::Mutex<HashMap<String, Vec<u8>>>,
+fn build_header_map(
+    auth_headers: &[(String, String)],
+    request_headers: &[(String, String)],
+) -> Result<HeaderMap, String> {
+    let mut header_map = HeaderMap::new();
+    append_headers(&mut header_map, auth_headers, "auth")?;
+    append_headers(&mut header_map, request_headers, "request")?;
+    Ok(header_map)
 }
 
-impl MemoryKvExecutor {
-    pub fn new() -> Self {
-        Self {
-            store: parking_lot::Mutex::new(HashMap::new()),
-        }
+fn append_headers(
+    header_map: &mut HeaderMap,
+    headers: &[(String, String)],
+    source: &str,
+) -> Result<(), String> {
+    for (name, value) in headers {
+        let header_name = HeaderName::from_str(name)
+            .map_err(|error| format!("invalid {source} header name `{name}`: {error}"))?;
+        let header_value = HeaderValue::from_str(value).map_err(|error| {
+            format!(
+                "invalid {source} header value for `{}`: {error}",
+                header_name.as_str()
+            )
+        })?;
+        header_map.append(header_name, header_value);
     }
-
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.store.lock().get(key).cloned()
-    }
-
-    pub fn set(&self, key: &str, value: Vec<u8>) {
-        self.store.lock().insert(key.to_string(), value);
-    }
-
-    pub fn delete(&self, key: &str) -> bool {
-        self.store.lock().remove(key).is_some()
-    }
-
-    pub fn list_keys(&self, prefix: &str) -> Vec<String> {
-        self.store
-            .lock()
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect()
-    }
+    Ok(())
 }
 
-impl Default for MemoryKvExecutor {
-    fn default() -> Self {
-        Self::new()
+fn response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| match value.to_str() {
+            Ok(value) => Some((name.as_str().to_string(), value.to_string())),
+            Err(error) => {
+                warn!(
+                    header = %name,
+                    err = %error,
+                    "dropping non-UTF8 response header because provider headers are UTF-8 only"
+                );
+                None
+            },
+        })
+        .collect()
+}
+
+fn owned_body(body: &[u8]) -> reqwest::Body {
+    // reqwest owns the request body across the async send path, so a borrowed
+    // provider slice has to be copied into an owned body here.
+    reqwest::Body::from(body.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_header_map_rejects_invalid_header_name() {
+        let error =
+            build_header_map(&[], &[("bad header".to_string(), "value".to_string())]).unwrap_err();
+        assert!(error.contains("invalid request header name"));
+    }
+
+    #[test]
+    fn response_headers_drop_non_utf8_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-valid", HeaderValue::from_static("ok"));
+        headers.insert("x-bytes", HeaderValue::from_bytes(b"\x80binary").unwrap());
+
+        let response_headers = response_headers(&headers);
+
+        assert_eq!(
+            response_headers,
+            vec![("x-valid".to_string(), "ok".to_string())]
+        );
     }
 }

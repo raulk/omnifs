@@ -3,7 +3,6 @@
 use crate::cache::{CacheRecord, L0_MAX_WEIGHT, L0_SKIP_THRESHOLD, RecordKind};
 use moka::sync::Cache;
 use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct L0Key {
@@ -13,7 +12,7 @@ pub struct L0Key {
 }
 
 impl L0Key {
-    pub fn new(inode: u64, kind: RecordKind, aux: Option<String>) -> Self {
+    pub const fn new(inode: u64, kind: RecordKind, aux: Option<String>) -> Self {
         Self { inode, kind, aux }
     }
 }
@@ -28,21 +27,15 @@ impl BrowseCacheL0 {
             .max_capacity(L0_MAX_WEIGHT)
             .weigher(|key: &L0Key, value: &Arc<CacheRecord>| -> u32 {
                 let key_size = 8 + 1 + key.aux.as_ref().map_or(0, String::len);
-                let val_size = 18 + value.payload.len();
+                let val_size = 2 + value.payload.len();
                 (key_size + val_size).try_into().unwrap_or(u32::MAX)
             })
-            .time_to_idle(Duration::from_secs(600))
             .build();
         Self { cache }
     }
 
     pub fn get(&self, key: &L0Key) -> Option<Arc<CacheRecord>> {
-        let record = self.cache.get(key)?;
-        if record.is_expired() {
-            self.cache.invalidate(key);
-            return None;
-        }
-        Some(record)
+        self.cache.get(key)
     }
 
     pub fn put(&self, key: L0Key, record: CacheRecord) {

@@ -42,7 +42,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-wasip1
+          targets: wasm32-wasip2
 
       - name: Set Cargo parallelism
         run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
@@ -59,10 +59,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run core clippy
-        run: cargo clippy -p omnifs-cli -p omnifs-host -- -D warnings
+        run: cargo clippy -p omnifs-cli -p omnifs-host -p omnifs-sdk -- -D warnings
 
       - name: Run provider clippy
-        run: cargo clippy -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip1 -- -D warnings
+        run: cargo clippy -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 -- -D warnings
 
   rust-build-test:
     if: needs.pr-gate.outputs.approved == 'true'
@@ -74,7 +74,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-wasip1
+          targets: wasm32-wasip2
 
       - name: Set Cargo parallelism
         run: echo "CARGO_BUILD_JOBS=$(nproc)" >> "$GITHUB_ENV"
@@ -86,11 +86,6 @@ jobs:
           shared-key: omnifs-rust-v1
           cache-on-failure: true
 
-      - name: Install cargo-component
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-component
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -99,12 +94,17 @@ jobs:
       - name: Build providers
         run: |
           set -euo pipefail
-          for manifest in providers/*/Cargo.toml; do
-            cargo component build --manifest-path "$manifest" --release --target-dir target
-          done
+          cargo build --target wasm32-wasip2 --release \
+              -p omnifs-provider-github -p omnifs-provider-dns -p test-provider
 
       - name: Run core tests
-        run: cargo nextest run --release -p omnifs-cli -p omnifs-host
+        run: cargo nextest run --release -p omnifs-cli -p omnifs-host -p omnifs-sdk
+
+      - name: Run trybuild UI fixtures
+        run: cargo test -p omnifs-sdk-macros --test macros_ui
+
+      - name: Check provider test compilation
+        run: cargo test -p omnifs-provider-github -p omnifs-provider-dns -p test-provider --target wasm32-wasip2 --no-run
 
       - name: Build CLI release binary
         run: cargo build --release -p omnifs-cli
@@ -114,8 +114,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/release/omnifs dist/omnifs
-          cp target/wasm32-wasip1/release/omnifs_provider_github.wasm dist/omnifs_provider_github.wasm
-          cp target/wasm32-wasip1/release/omnifs_provider_dns.wasm dist/omnifs_provider_dns.wasm
+          cp target/wasm32-wasip2/release/omnifs_provider_github.wasm dist/omnifs_provider_github.wasm
+          cp target/wasm32-wasip2/release/omnifs_provider_dns.wasm dist/omnifs_provider_dns.wasm
 
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@v4.6.2

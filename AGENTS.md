@@ -69,12 +69,20 @@ ssh -F /dev/null -T git@github.com
 - Runtime log file is `/tmp/omnifs.log` inside the container.
 - Clone failures should surface there with `git clone` stderr.
 - FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
+- Use `omnifs status` inside the container for fast mount/config/plugin/cache triage.
+- Do not assume `docker exec` inherits the entrypoint environment; verify live runtime paths rather than inferring them from defaults.
 
 When a repo path returns `Input/output error`, check:
 
 1. `docker compose logs omnifs`
 2. SSH auth inside the container
 3. whether the mount is still present in `/proc/mounts`
+
+When debugging hangs or slow paths, start with user-visible probes before theory:
+
+1. `cd /github/<owner>`
+2. `cat /dns/@google/<domain>/MX`
+3. `tail -n 80 /tmp/omnifs.log`
 
 ## Shell expectations
 
@@ -102,6 +110,15 @@ Docker build:
 docker compose build
 ```
 
+For mount/provider/clone changes, do not stop at Rust-only checks. Validate through the supported runtime path:
+
+```bash
+just dev
+docker exec omnifs /bin/zsh -lc 'omnifs status'
+docker exec omnifs /bin/zsh -lc 'OMNIFS_DEMO_MODE=smoke /tmp/demo.sh'
+docker exec omnifs /bin/zsh -lc 'tail -n 80 /tmp/omnifs.log'
+```
+
 The Dockerfile is intentionally cache-oriented:
 
 - multi-stage build
@@ -122,6 +139,9 @@ Preserve that structure unless there is a clear regression or simplification wit
   - clone manager
 - Do not silently change the auth model or transport model.
 - If switching clone transport from SSH to HTTPS/token, call that out explicitly because it changes the operational contract.
+- When a refactor touches clone, routing, or traversal behavior, compare against the pre-refactor behavior before accepting the new result.
+- Preserve existing repo-tree passthrough and ownership semantics unless intentionally changing the contract.
+- Providers must project all data they have already fetched. If a handler has an upstream payload in hand, emit every sibling file and child that can be derived from it instead of returning only the requested field and forcing later refetches.
 
 ## Design judgment
 
@@ -129,6 +149,15 @@ Preserve that structure unless there is a clear regression or simplification wit
 - Bias toward single-phase designs over multi-phase orchestration on the hot path.
 - Keep data near the point where it is naturally produced and immediately consumed; split it into a second mechanism only when that separation buys something concrete.
 - Do not defend abstraction boundaries that add complexity in the common case.
+- Once the direct path exists, remove bridge-style dispatch layers and other transitional glue instead of letting them harden into architecture.
+
+## Protocol and contract guardrails
+
+- Reuse source-of-truth terms. Do not invent new names for public surfaces unless the rename is explicit.
+- Keep public contracts at the right layer. Host internals must not leak into SDK/WIT naming or semantics.
+- Do not reuse an existing abstraction if it changes the behavior model. Semantic fit matters more than code reuse.
+- For protocol changes, write the exact interaction trace first and reject extra hops on hot paths.
+- If something is conceptually one-way, stop before making it `await`-shaped. Fix the boundary instead of forcing it through request/response machinery.
 
 ## Mutation protocol
 
