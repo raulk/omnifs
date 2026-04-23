@@ -96,8 +96,7 @@ impl CalloutRuntime {
                 let parent_ino = handles
                     .path_to_inode
                     .get(&PathKey::new(handles.mount.clone(), parent_path))
-                    .map(|r| *r.value())
-                    .unwrap_or(1);
+                    .map_or(1, |r| *r.value());
                 if let Some(notifier) = handles.notifier.lock().as_ref() {
                     let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(child_name));
                 }
@@ -136,8 +135,7 @@ impl CalloutRuntime {
                     handles.mount.clone(),
                     parent_path.to_string(),
                 ))
-                .map(|r| *r.value())
-                .unwrap_or(1);
+                .map_or(1, |r| *r.value());
             if let Some(notifier) = handles.notifier.lock().as_ref() {
                 let _ = notifier.inval_entry(INodeNo(parent_ino), OsStr::new(child_name));
             }
