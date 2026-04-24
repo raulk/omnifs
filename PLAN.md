@@ -6,8 +6,9 @@ Deferred: the kafka provider needs basic-auth support in the host
 ## Blocked by
 
 - Host-side basic-auth support in `crates/host/src/auth/mod.rs` (no PR yet).
-- PR #28, PR #29, PR TBD `feat/sdk-error-constructors` still apply as
-  transitive blockers once basic-auth lands.
+- PR #28 and PR #29 still apply as transitive blockers once basic-auth
+  lands. (The `rate_limited` / `permission_denied` / `version_mismatch`
+  constructors are already on `main` from the #27 refactor.)
 
 ## Status
 
