@@ -4,11 +4,14 @@ The `notion` worktree (`/Users/raul/W/gvfs/.worktrees/providers/notion`, tip `e1
 
 ## Blocked by
 
-This plan cannot start execution until all three of these have merged into `main`:
+This plan cannot start execution until both of these have merged into `main`:
 
 - PR #28 `feat/sdk-http-post-support` — https://github.com/raulk/omnifs/pull/28
 - PR #29 `feat/sdk-path-rest-captures` — https://github.com/raulk/omnifs/pull/29
-- PR TBD `feat/sdk-error-constructors` — error constructor convenience methods
+
+Note: `ProviderError::rate_limited` / `::permission_denied` / `::version_mismatch`
+constructors are already on `main` (landed with the #27 refactor). No separate PR
+is needed.
 
 ## Execution model
 
