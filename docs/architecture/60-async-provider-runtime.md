@@ -119,20 +119,30 @@ each suspension point yielding:
 
 ## Queue, cancellation, and shutdown
 
-`Instance` sends commands through an unbounded channel. The driver keeps
-namespace and event calls in `FuturesUnordered`; the channel provides no
-backpressure limit.
+`Instance` sends commands through a bounded queue of 64 entries and admits at
+most 32 asynchronous provider operations at once. A full queue or exhausted
+in-flight budget returns a typed provider-admission error before the operation
+enters the driver. Control commands use the same bounded queue and remain
+separate from operation permits.
 
-Dropping a caller after its command was sent drops the reply receiver but does
-not explicitly cancel the provider call. Driver shutdown stops command
-dispatch, invokes the provider lifecycle shutdown export, and then drops
-remaining in-flight call futures as the driver exits. A driver failure closes
-the command and reply channels and surfaces as an engine error to callers.
+The operation envelope owns the fields shared by every asynchronous command:
+the typed command payload, tracing span, reply sender, cancellation receiver,
+and in-flight permit. Command variants carry only operation-specific data.
+This keeps queue policy in `Instance::submit` while generated WIT calls remain
+explicit in the driver.
 
-These are current mechanics, not a provider-visible scheduling guarantee.
-Changes to queue bounds, caller cancellation, draining, or shutdown order need
-an explicit runtime design because they affect every operation on one provider
-instance.
+Dropping a caller drops the envelope's cancellation sender. The driver selects
+between the provider future and that cancellation receiver; cancellation drops
+the suspended provider future and releases the permit without sending a stale
+reply. Shutdown rejects new work, drains in-flight operations for up to ten
+seconds, invokes the provider lifecycle shutdown export after a successful
+drain, and reports a protocol error if the drain deadline expires. Driver
+failure closes the command and reply channels and surfaces as an engine error
+to callers.
+
+These limits are host runtime policy, not a provider-visible ordering or
+fairness guarantee. Changes to queue bounds, cancellation, draining, or
+shutdown order require corresponding admission and lifecycle tests.
 
 ## Test harness
 

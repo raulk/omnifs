@@ -7,6 +7,7 @@ use crate::effect_apply::EffectApplier;
 use crate::effect_apply::LookupOutcome;
 use crate::inspector;
 use crate::ops::namespace::{ChunkOutcome, ListOutcome, OpenOutcome, ReadOutcome};
+use crate::ops::validate::ValidatedEffects;
 use crate::runtime::{EngineError, Result};
 use omnifs_api::events::InspectorOutcome;
 use omnifs_core::path::{Path, Segment};
@@ -27,27 +28,28 @@ struct TerminalTransaction<'a> {
 }
 
 impl<'a> TerminalTransaction<'a> {
-    fn prepare<T, F>(
+    fn prepare<'effects, T, F>(
         runtime: &'a Runtime,
         span: tracing::Span,
         captured_epoch: u64,
         blob_guard: BlobPublicationGuard<'a>,
         wire_result: std::result::Result<T, wit_types::ProviderError>,
-        effects: &wit_types::Effects,
+        effects: &'effects wit_types::Effects,
         validate: F,
     ) -> Result<(T, Self)>
     where
         F: FnOnce(
             &std::result::Result<T, wit_types::ProviderError>,
-            &wit_types::Effects,
-        ) -> std::result::Result<(), String>,
+            &'effects wit_types::Effects,
+        ) -> std::result::Result<ValidatedEffects<'effects>, String>,
     {
-        validate(&wire_result, effects).map_err(EngineError::ProviderProtocol)?;
+        let validated_effects =
+            validate(&wire_result, effects).map_err(EngineError::ProviderProtocol)?;
         inspect_result(&span, &wire_result);
         let pending_blobs = blob_guard.take();
         let wire_result = runtime.provider_result(wire_result)?;
-        let mut transition = EffectApplier::new(&runtime.resources)
-            .lower_effects(effects, clock::now_millis())
+        let mut transition = validated_effects
+            .lower(&runtime.resources, clock::now_millis())
             .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
         transition.blobs.extend(pending_blobs);
         Ok((

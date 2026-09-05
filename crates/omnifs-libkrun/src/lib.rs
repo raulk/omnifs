@@ -44,6 +44,18 @@ const MEMORY_MIB: u32 = 2048;
 const HELPER_RECORD_VERSION: u8 = 4;
 const CONTROL_MAX_LINE_BYTES: u64 = 128;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
+const FIXED_ARGUMENT_FLAGS: [&str; 8] = [
+    "--state-dir",
+    "--attach-socket",
+    "--name",
+    "--protocol",
+    "--runtime",
+    "--location",
+    "--libkrun-guest-image",
+    "--instance-id",
+];
+const FIXED_ARGUMENT_USAGE: &str = "expected `--state-dir PATH --attach-socket PATH --name NAME --protocol PROTOCOL \
+     --runtime RUNTIME --location PATH --libkrun-guest-image IMAGE --instance-id ID`";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -258,6 +270,23 @@ pub struct Config {
     instance_id: String,
 }
 
+fn parse_fixed_arguments(
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<[OsString; 8], Error> {
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments.len() != FIXED_ARGUMENT_FLAGS.len() * 2 {
+        return Err(Error::Arguments(FIXED_ARGUMENT_USAGE.to_owned()));
+    }
+    for (index, expected_flag) in FIXED_ARGUMENT_FLAGS.iter().enumerate() {
+        if arguments[index * 2] != *expected_flag {
+            return Err(Error::Arguments(FIXED_ARGUMENT_USAGE.to_owned()));
+        }
+    }
+    Ok(std::array::from_fn(|index| {
+        arguments[index * 2 + 1].clone()
+    }))
+}
+
 impl Config {
     pub fn omnifs(
         state_dir: impl AsRef<Path>,
@@ -302,47 +331,16 @@ impl Config {
     }
 
     pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, Error> {
-        let arguments = arguments.into_iter().collect::<Vec<_>>();
         let [
-            state_flag,
             state_dir,
-            attach_flag,
             attach_socket,
-            name_flag,
             filesystem_id,
-            protocol_flag,
             protocol,
-            runtime_flag,
             runtime,
-            location_flag,
             location,
-            guest_image_flag,
             guest_image,
-            instance_flag,
             instance_id,
-        ] = arguments.as_slice()
-        else {
-            return Err(Error::Arguments(
-                "expected `--state-dir PATH --attach-socket PATH --name NAME --protocol PROTOCOL \
-                 --runtime RUNTIME --location PATH --libkrun-guest-image IMAGE --instance-id ID`"
-                    .to_owned(),
-            ));
-        };
-        if state_flag != "--state-dir"
-            || attach_flag != "--attach-socket"
-            || name_flag != "--name"
-            || protocol_flag != "--protocol"
-            || runtime_flag != "--runtime"
-            || location_flag != "--location"
-            || guest_image_flag != "--libkrun-guest-image"
-            || instance_flag != "--instance-id"
-        {
-            return Err(Error::Arguments(
-                "expected `--state-dir PATH --attach-socket PATH --name NAME --protocol PROTOCOL \
-                 --runtime RUNTIME --location PATH --libkrun-guest-image IMAGE --instance-id ID`"
-                    .to_owned(),
-            ));
-        }
+        ] = parse_fixed_arguments(arguments)?;
         Self::omnifs(
             PathBuf::from(state_dir),
             PathBuf::from(attach_socket),
@@ -372,22 +370,17 @@ impl Config {
     }
 
     fn arguments(&self) -> [(&'static str, OsString); 8] {
-        [
-            ("--state-dir", self.state_dir.clone().into_os_string()),
-            (
-                "--attach-socket",
-                self.attach_socket.clone().into_os_string(),
-            ),
-            ("--name", OsString::from(self.filesystem.as_str())),
-            ("--protocol", OsString::from(self.spec.protocol().as_str())),
-            ("--runtime", OsString::from(self.spec.runtime().as_str())),
-            ("--location", self.spec.location().as_os_str().to_owned()),
-            (
-                "--libkrun-guest-image",
-                OsString::from(self.spec.libkrun_guest_image().unwrap_or_default()),
-            ),
-            ("--instance-id", OsString::from(&self.instance_id)),
-        ]
+        let values = [
+            self.state_dir.clone().into_os_string(),
+            self.attach_socket.clone().into_os_string(),
+            OsString::from(self.filesystem.as_str()),
+            OsString::from(self.spec.protocol().as_str()),
+            OsString::from(self.spec.runtime().as_str()),
+            self.spec.location().as_os_str().to_owned(),
+            OsString::from(self.spec.libkrun_guest_image().unwrap_or_default()),
+            OsString::from(&self.instance_id),
+        ];
+        std::array::from_fn(|index| (FIXED_ARGUMENT_FLAGS[index], values[index].clone()))
     }
 
     fn validate(&self) -> Result<(), Error> {

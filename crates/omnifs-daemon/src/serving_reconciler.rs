@@ -15,7 +15,7 @@ use omnifs_api::{
 use omnifs_core::{ActionId, ProviderId, ResourceKind, ResourceRevision};
 use omnifs_engine::{DrainOutcome, HostOnline, RetiredGeneration, ServingCell};
 use omnifs_state::StateStore;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::{Mutex, watch};
@@ -310,7 +310,7 @@ async fn reconcile_latest(
             },
             Err(error) => {
                 publish_failure(&runtime.resources, Some(&desired), &actions, &error);
-                fail_actions(&runtime.state, &runtime.resources, &actions, &error).await;
+                fail_actions(&runtime.resources, &actions, &error).await;
                 return ReconcileLoopOutcome::Settled;
             },
         }
@@ -675,11 +675,19 @@ async fn complete_actions_after_publish(
         if receipt.kind == ActionKind::RestartFilesystem {
             continue;
         }
-        match state
-            .transition_action(*action_id, ActionPhase::Ready, None, None)
+        match resources
+            .transition_action_with_progress(*action_id, ActionPhase::Ready, None, None, |ready| {
+                record_credential_progress(
+                    resources,
+                    ready,
+                    CredentialProgressStage::Ready,
+                    None,
+                    None,
+                );
+            })
             .await
         {
-            Ok(ready) => publish_completed_action(resources, ready),
+            Ok(ready) => publish_action_completed_event(resources, ready),
             Err(error) => errors.push(format!("complete action {action_id}: {error:#}")),
         }
     }
@@ -754,31 +762,13 @@ async fn enqueue_required_providers(
     desired: &omnifs_state::ResourceSnapshot,
     retry_failed: bool,
 ) -> anyhow::Result<Vec<ProviderId>> {
-    let providers: BTreeMap<_, _> = desired
-        .resources
-        .resources()
-        .iter()
-        .filter_map(|resource| match resource {
-            ResourceDefinition::Provider(provider) => {
-                Some((provider.name.clone(), provider.artifact))
-            },
-            _ => None,
-        })
-        .collect();
-    let mounted_names: BTreeSet<_> = desired
-        .resources
-        .resources()
-        .iter()
-        .filter_map(|resource| match resource {
-            ResourceDefinition::Mount(mount) => Some(mount.provider.clone()),
-            _ => None,
-        })
-        .collect();
+    let view = omnifs_state::ResourceView::at(desired);
+    let mounted_names: BTreeSet<_> = view.mounts().map(|mount| mount.provider.clone()).collect();
     let mut aliases = HashMap::<ProviderId, Vec<_>>::new();
     for name in mounted_names {
-        let provider = providers
-            .get(&name)
-            .copied()
+        let provider = view
+            .provider(&name)
+            .map(|provider| provider.artifact)
             .with_context(|| format!("mounted provider resource `{name}` is absent"))?;
         aliases.entry(provider).or_default().push(name);
     }
@@ -821,13 +811,13 @@ async fn start_pending_actions(
             continue;
         };
         let receipt = if receipt.phase == ActionPhase::Accepted {
-            state
+            resources
                 .transition_action(receipt.action_id, ActionPhase::Running, None, None)
                 .await?
         } else {
+            resources.publish_action(&receipt);
             receipt
         };
-        resources.publish_action(&receipt);
         resources.progress().record_credential(
             ProgressTarget::Action(receipt.action_id),
             CredentialProgress {
@@ -867,11 +857,25 @@ async fn complete_revocations_after_drain(
                 .await;
         match outcome {
             Ok(RevocationActionOutcome::Deleted) => {
-                match state
-                    .transition_action(*action_id, ActionPhase::Ready, None, None)
+                match resources
+                    .transition_action_with_progress(
+                        *action_id,
+                        ActionPhase::Ready,
+                        None,
+                        None,
+                        |ready| {
+                            record_credential_progress(
+                                resources,
+                                ready,
+                                CredentialProgressStage::Ready,
+                                None,
+                                None,
+                            );
+                        },
+                    )
                     .await
                 {
-                    Ok(ready) => publish_completed_action(resources, ready),
+                    Ok(ready) => publish_action_completed_event(resources, ready),
                     Err(error) => tracing::warn!(
                         action = %action_id,
                         %error,
@@ -881,7 +885,6 @@ async fn complete_revocations_after_drain(
             },
             Ok(RevocationActionOutcome::Unknown) => {
                 publish_failed_action(
-                    state,
                     resources,
                     *action_id,
                     "credential_revocation_unknown",
@@ -891,7 +894,6 @@ async fn complete_revocations_after_drain(
             },
             Err(error) => {
                 publish_failed_action(
-                    state,
                     resources,
                     *action_id,
                     "credential_revocation_failed",
@@ -903,18 +905,39 @@ async fn complete_revocations_after_drain(
     }
 }
 
-fn publish_completed_action(resources: &ResourceControl, ready: omnifs_api::ActionReceipt) {
-    let action_id = ready.action_id;
+fn record_credential_progress(
+    resources: &ResourceControl,
+    action: &omnifs_api::ActionReceipt,
+    stage: CredentialProgressStage,
+    error_code: Option<String>,
+    detail: Option<String>,
+) {
     resources.progress().record_credential(
-        ProgressTarget::Action(action_id),
+        ProgressTarget::Action(action.action_id),
         CredentialProgress {
-            key: ready.target.clone(),
-            stage: CredentialProgressStage::Ready,
-            error_code: None,
-            detail: None,
+            key: action.target.clone(),
+            stage,
+            error_code,
+            detail,
         },
     );
+}
+
+#[cfg(test)]
+fn publish_completed_action(resources: &ResourceControl, ready: omnifs_api::ActionReceipt) {
+    record_credential_progress(
+        resources,
+        &ready,
+        CredentialProgressStage::Ready,
+        None,
+        None,
+    );
     resources.publish_action(&ready);
+    publish_action_completed_event(resources, ready);
+}
+
+fn publish_action_completed_event(resources: &ResourceControl, ready: omnifs_api::ActionReceipt) {
+    let action_id = ready.action_id;
     resources.progress().publish(
         ProgressTarget::Action(action_id),
         ProgressEventKind::ActionCompleted(ready),
@@ -922,33 +945,31 @@ fn publish_completed_action(resources: &ResourceControl, ready: omnifs_api::Acti
 }
 
 async fn publish_failed_action(
-    state: &StateStore,
     resources: &ResourceControl,
     action_id: ActionId,
     error_code: &str,
     detail: &str,
 ) {
-    let Ok(failed) = state
-        .transition_action(
+    let Ok(failed) = resources
+        .transition_action_with_progress(
             action_id,
             ActionPhase::Failed,
             Some(error_code.into()),
             Some(detail.into()),
+            |failed| {
+                record_credential_progress(
+                    resources,
+                    failed,
+                    CredentialProgressStage::Failed,
+                    Some(error_code.into()),
+                    Some(detail.into()),
+                );
+            },
         )
         .await
     else {
         return;
     };
-    resources.progress().record_credential(
-        ProgressTarget::Action(action_id),
-        CredentialProgress {
-            key: failed.target.clone(),
-            stage: CredentialProgressStage::Failed,
-            error_code: Some(error_code.into()),
-            detail: Some(detail.into()),
-        },
-    );
-    resources.publish_action(&failed);
     resources.progress().publish(
         ProgressTarget::Action(action_id),
         ProgressEventKind::ActionFailed {
@@ -1183,22 +1204,10 @@ fn publish_failure(
     );
 }
 
-async fn fail_actions(
-    state: &StateStore,
-    resources: &ResourceControl,
-    actions: &[ActionId],
-    error: &ReconcileFailure,
-) {
+async fn fail_actions(resources: &ResourceControl, actions: &[ActionId], error: &ReconcileFailure) {
     let detail = format!("{:#}", error.source);
     for action_id in actions {
-        publish_failed_action(
-            state,
-            resources,
-            *action_id,
-            "serving_reconcile_failed",
-            &detail,
-        )
-        .await;
+        publish_failed_action(resources, *action_id, "serving_reconcile_failed", &detail).await;
     }
 }
 

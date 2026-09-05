@@ -25,6 +25,13 @@ generation publication, runtime launch, mounting, and VFS waits. Clients follow
 A revision states desired existence, not completed runtime work. Reconciliation
 resumes from SQLite without a client journal.
 
+`omnifs_state::ResourceView` is the derived lookup surface for one
+`ResourceSnapshot`. `ResourceView::at(snapshot)` builds provider, credential,
+and mount indexes while retaining the snapshot revision and digest. Callers
+use the same view type for either side of a comparison and call `diff`; the
+view never becomes a second authority or a persisted cache. Order-sensitive
+declaration validation remains owned by `omnifs-api::NormalizedResourceSet`.
+
 ## Reconciliation
 
 One required-cache `ComponentEngine` serves preparation and `HostOnline`.

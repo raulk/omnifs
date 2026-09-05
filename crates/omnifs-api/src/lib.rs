@@ -54,23 +54,6 @@ pub use resource::{
 /// subsystem.
 pub mod events;
 
-/// TCP namespace attach address, injected by a guest filesystem launcher and
-/// read by `omnifs-thin` when no local `--attach` path is given. Docker uses
-/// `host.docker.internal:<port>` to reach the host-native daemon's fixed TCP
-/// listener. The listener currently has no authentication.
-pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
-
-/// Guest vsock port the filesystem runner dials on host CID (`VMADDR_CID_HOST`)
-/// once its FUSE mount is serving, writing a single `ready\n` line so the
-/// libkrun runner's `launch` can observe guest readiness without an
-/// external probe into the guest (the Docker runner instead polls the
-/// mount path via `docker exec` from outside the container). Set only by the
-/// libkrun runner's seed (`omnifs-seed.conf`); absent on the Docker path.
-/// The runner treats this env being set on a non-Linux target as a hard
-/// error rather than silently ignoring it, since only the Linux libkrun
-/// guest can dial vsock.
-pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderMetadata {

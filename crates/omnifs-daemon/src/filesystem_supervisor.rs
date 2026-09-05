@@ -12,7 +12,8 @@ use omnifs_api::{
     ProgressEventKind, ProgressTarget, ResourcePhase,
 };
 use omnifs_core::{
-    FilesystemRuntime, FilesystemSpec, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
+    ActionId, FilesystemRuntime, FilesystemSpec, ResourceKey, ResourceKind, ResourceName,
+    ResourceRevision,
 };
 use omnifs_state::{
     DesiredFilesystem, FilesystemInstance, FilesystemObservation, FilesystemPhase, StateStore,
@@ -354,10 +355,9 @@ async fn reconcile_one_active(
         && action.phase != ActionPhase::Running
     {
         *action = context
-            .state
+            .resources
             .transition_action(action.action_id, ActionPhase::Running, None, None)
             .await?;
-        context.resources.publish_action(action);
     }
 
     let Some(desired) = work.desired.clone() else {
@@ -387,8 +387,7 @@ async fn reconcile_one_active(
             None,
             None,
         );
-        publish_phase(
-            context,
+        context.publish_phase(
             &desired,
             work.action.as_ref(),
             FilesystemProgressStage::WaitingForNamespace,
@@ -576,8 +575,7 @@ async fn reconcile_one_active(
         None,
         None,
     );
-    publish_phase(
-        context,
+    context.publish_phase(
         &desired,
         work.action.as_ref(),
         FilesystemProgressStage::Starting,
@@ -731,7 +729,7 @@ async fn reconcile_deletion(
     {
         return Ok(WorkOutcome::Done);
     }
-    publish_deletion(context, revision, work);
+    context.publish_deletion(revision, work);
     if let (Some(spec), Some(runtime_instance)) = (
         work.instance.observed_spec.clone(),
         work.instance.runtime_instance.clone(),
@@ -848,7 +846,7 @@ async fn fail_action_for_deleted_filesystem(
         return Ok(());
     };
     *action = context
-        .state
+        .resources
         .transition_action(
             action.action_id,
             ActionPhase::Failed,
@@ -856,7 +854,6 @@ async fn fail_action_for_deleted_filesystem(
             Some(DETAIL.to_owned()),
         )
         .await?;
-    context.resources.publish_action(action);
     context.resources.progress().publish(
         ProgressTarget::Action(action.action_id),
         ProgressEventKind::ActionFailed {
@@ -972,8 +969,7 @@ async fn record_stopping(
         None,
         None,
     );
-    publish_phase(
-        context,
+    context.publish_phase(
         desired,
         work.action.as_ref(),
         FilesystemProgressStage::Stopping,
@@ -992,8 +988,7 @@ async fn finish_ready(
     _instance: &FilesystemInstance,
     current_revision: ResourceRevision,
 ) -> anyhow::Result<()> {
-    publish_phase(
-        context,
+    context.publish_phase(
         desired,
         action,
         FilesystemProgressStage::Ready,
@@ -1014,10 +1009,9 @@ async fn finish_ready(
     }
     if let Some(action) = action {
         let ready = context
-            .state
+            .resources
             .transition_action(action.action_id, ActionPhase::Ready, None, None)
             .await?;
-        context.resources.publish_action(&ready);
         context.resources.progress().publish(
             ProgressTarget::Action(ready.action_id),
             ProgressEventKind::ActionCompleted(ready),
@@ -1052,13 +1046,11 @@ async fn retry_or_fail(
     }
     if let Some(action) = &mut work.action {
         *action = context
-            .state
+            .resources
             .transition_action(action.action_id, ActionPhase::Retrying, None, None)
             .await?;
-        context.resources.publish_action(action);
     }
-    publish_phase(
-        context,
+    context.publish_phase(
         desired,
         work.action.as_ref(),
         FilesystemProgressStage::Retrying,
@@ -1072,8 +1064,7 @@ async fn retry_or_fail(
             ..PhaseReport::default()
         },
     );
-    mark_resource_phase(
-        context,
+    context.mark_resource_phase(
         current_revision,
         &work.name,
         ResourcePhase::Retrying,
@@ -1101,8 +1092,7 @@ async fn terminal_failure(
     {
         return Ok(WorkOutcome::Done);
     }
-    publish_phase(
-        context,
+    context.publish_phase(
         desired,
         work.action.as_ref(),
         FilesystemProgressStage::Failed,
@@ -1113,8 +1103,7 @@ async fn terminal_failure(
             ..PhaseReport::default()
         },
     );
-    mark_resource_phase(
-        context,
+    context.mark_resource_phase(
         current_revision,
         &work.name,
         ResourcePhase::Failed,
@@ -1131,7 +1120,7 @@ async fn terminal_failure(
     );
     if let Some(action) = &work.action {
         let failed = context
-            .state
+            .resources
             .transition_action(
                 action.action_id,
                 ActionPhase::Failed,
@@ -1139,7 +1128,6 @@ async fn terminal_failure(
                 Some(detail.to_owned()),
             )
             .await?;
-        context.resources.publish_action(&failed);
         context.resources.progress().publish(
             ProgressTarget::Action(failed.action_id),
             ProgressEventKind::ActionFailed {
@@ -1169,7 +1157,7 @@ async fn retry_deleted(
     {
         return Ok(WorkOutcome::Done);
     }
-    publish_deletion(context, revision, work);
+    context.publish_deletion(revision, work);
     Ok(WorkOutcome::Retry)
 }
 
@@ -1190,8 +1178,7 @@ async fn terminal_deleted_failure(
     {
         return Ok(WorkOutcome::Done);
     }
-    mark_resource_phase(
-        context,
+    context.mark_resource_phase(
         revision,
         &work.name,
         ResourcePhase::Failed,
@@ -1218,88 +1205,128 @@ struct PhaseReport {
     next_retry_unix_ms: Option<u64>,
 }
 
-fn publish_phase(
-    context: &ReconcileContext,
-    desired: &DesiredFilesystem,
-    action: Option<&ActionReceipt>,
-    stage: FilesystemProgressStage,
-    report: PhaseReport,
-) {
-    let progress = FilesystemProgress {
-        key: desired.definition.key(),
-        desired_revision: desired.revision,
-        runtime: desired.definition.spec.runtime(),
-        stage,
-        completed_bytes: report.completed_bytes,
-        total_bytes: None,
-        queued_filesystems: context.queued.load(Ordering::Acquire),
-        active_filesystems: context.active.load(Ordering::Acquire),
-        error_code: report.error_code,
-        detail: report.detail,
-        retry_count: report.retry_count,
-        next_retry_unix_ms: report.next_retry_unix_ms,
-    };
-    context.resources.progress().record_filesystem(
-        ProgressTarget::DesiredRevision(desired.revision),
-        progress.clone(),
-    );
-    if let Some(action) = action {
-        context
-            .resources
-            .progress()
-            .record_filesystem(ProgressTarget::Action(action.action_id), progress);
+impl ReconcileContext {
+    fn publish_phase(
+        &self,
+        desired: &DesiredFilesystem,
+        action: Option<&ActionReceipt>,
+        stage: FilesystemProgressStage,
+        report: PhaseReport,
+    ) {
+        record_filesystem_progress(
+            &self.resources,
+            &self.queued,
+            &self.active,
+            action.map(|receipt| receipt.action_id),
+            FilesystemProgressInput {
+                key: desired.definition.key(),
+                desired_revision: desired.revision,
+                runtime: desired.definition.spec.runtime(),
+                stage,
+                completed_bytes: report.completed_bytes,
+                total_bytes: None,
+                error_code: report.error_code,
+                detail: report.detail,
+                retry_count: report.retry_count,
+                next_retry_unix_ms: report.next_retry_unix_ms,
+            },
+        );
+    }
+
+    fn publish_deletion(&self, revision: ResourceRevision, work: &Work) {
+        let runtime = work
+            .instance
+            .observed_spec
+            .as_ref()
+            .or(work.instance.desired_spec.as_ref())
+            .map_or(FilesystemRuntime::Host, FilesystemSpec::runtime);
+        record_filesystem_progress(
+            &self.resources,
+            &self.queued,
+            &self.active,
+            None,
+            FilesystemProgressInput {
+                key: ResourceKey::new(ResourceKind::Filesystem, work.name.clone()),
+                desired_revision: revision,
+                runtime,
+                stage: FilesystemProgressStage::Deleting,
+                completed_bytes: 0,
+                total_bytes: None,
+                error_code: work.instance.last_error_code.clone(),
+                detail: work.instance.last_error_detail.clone(),
+                retry_count: work.retry_count,
+                next_retry_unix_ms: work
+                    .instance
+                    .retry_at
+                    .and_then(|seconds| u64::try_from(seconds).ok())
+                    .and_then(|seconds| seconds.checked_mul(1_000)),
+            },
+        );
+        self.mark_resource_phase(
+            revision,
+            &work.name,
+            ResourcePhase::Deleting,
+            work.instance.last_error_code.as_deref(),
+            work.instance.last_error_detail.as_deref(),
+        );
+    }
+
+    fn mark_resource_phase(
+        &self,
+        revision: ResourceRevision,
+        name: &ResourceName,
+        phase: ResourcePhase,
+        error_code: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        self.resources
+            .mark_filesystem_phase(revision, name, phase, error_code, detail);
     }
 }
 
-fn publish_deletion(context: &ReconcileContext, revision: ResourceRevision, work: &Work) {
-    let runtime = work
-        .instance
-        .observed_spec
-        .as_ref()
-        .or(work.instance.desired_spec.as_ref())
-        .map_or(FilesystemRuntime::Host, FilesystemSpec::runtime);
-    context.resources.progress().record_filesystem(
-        ProgressTarget::DesiredRevision(revision),
-        FilesystemProgress {
-            key: ResourceKey::new(ResourceKind::Filesystem, work.name.clone()),
-            desired_revision: revision,
-            runtime,
-            stage: FilesystemProgressStage::Deleting,
-            completed_bytes: 0,
-            total_bytes: None,
-            queued_filesystems: context.queued.load(Ordering::Acquire),
-            active_filesystems: context.active.load(Ordering::Acquire),
-            error_code: work.instance.last_error_code.clone(),
-            detail: work.instance.last_error_detail.clone(),
-            retry_count: work.retry_count,
-            next_retry_unix_ms: work
-                .instance
-                .retry_at
-                .and_then(|seconds| u64::try_from(seconds).ok())
-                .and_then(|seconds| seconds.checked_mul(1_000)),
-        },
+fn record_filesystem_progress(
+    resources: &ResourceControl,
+    queued: &AtomicU32,
+    active: &AtomicU32,
+    action_id: Option<ActionId>,
+    input: FilesystemProgressInput,
+) {
+    let progress = FilesystemProgress {
+        key: input.key,
+        desired_revision: input.desired_revision,
+        runtime: input.runtime,
+        stage: input.stage,
+        completed_bytes: input.completed_bytes,
+        total_bytes: input.total_bytes,
+        queued_filesystems: queued.load(Ordering::Acquire),
+        active_filesystems: active.load(Ordering::Acquire),
+        error_code: input.error_code,
+        detail: input.detail,
+        retry_count: input.retry_count,
+        next_retry_unix_ms: input.next_retry_unix_ms,
+    };
+    resources.progress().record_filesystem(
+        ProgressTarget::DesiredRevision(progress.desired_revision),
+        progress.clone(),
     );
-    mark_resource_phase(
-        context,
-        revision,
-        &work.name,
-        ResourcePhase::Deleting,
-        work.instance.last_error_code.as_deref(),
-        work.instance.last_error_detail.as_deref(),
-    );
+    if let Some(action_id) = action_id {
+        resources
+            .progress()
+            .record_filesystem(ProgressTarget::Action(action_id), progress);
+    }
 }
 
-fn mark_resource_phase(
-    context: &ReconcileContext,
-    revision: ResourceRevision,
-    name: &ResourceName,
-    phase: ResourcePhase,
-    error_code: Option<&str>,
-    detail: Option<&str>,
-) {
-    context
-        .resources
-        .mark_filesystem_phase(revision, name, phase, error_code, detail);
+struct FilesystemProgressInput {
+    key: ResourceKey,
+    desired_revision: ResourceRevision,
+    runtime: FilesystemRuntime,
+    stage: FilesystemProgressStage,
+    completed_bytes: u64,
+    total_bytes: Option<u64>,
+    error_code: Option<String>,
+    detail: Option<String>,
+    retry_count: u32,
+    next_retry_unix_ms: Option<u64>,
 }
 
 async fn forward_runtime_events(
@@ -1315,29 +1342,24 @@ async fn forward_runtime_events(
         let Some(stage) = stage else {
             continue;
         };
-        let progress = FilesystemProgress {
-            key: desired.definition.key(),
-            desired_revision: desired.revision,
-            runtime: desired.definition.spec.runtime(),
-            stage,
-            completed_bytes,
-            total_bytes,
-            queued_filesystems: queued.load(Ordering::Acquire),
-            active_filesystems: active.load(Ordering::Acquire),
-            error_code: None,
-            detail: None,
-            retry_count: 0,
-            next_retry_unix_ms: None,
-        };
-        resources.progress().record_filesystem(
-            ProgressTarget::DesiredRevision(desired.revision),
-            progress.clone(),
+        record_filesystem_progress(
+            &resources,
+            &queued,
+            &active,
+            action.as_ref().map(|receipt| receipt.action_id),
+            FilesystemProgressInput {
+                key: desired.definition.key(),
+                desired_revision: desired.revision,
+                runtime: desired.definition.spec.runtime(),
+                stage,
+                completed_bytes,
+                total_bytes,
+                error_code: None,
+                detail: None,
+                retry_count: 0,
+                next_retry_unix_ms: None,
+            },
         );
-        if let Some(action) = &action {
-            resources
-                .progress()
-                .record_filesystem(ProgressTarget::Action(action.action_id), progress);
-        }
     }
 }
 

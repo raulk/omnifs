@@ -13,10 +13,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint};
-use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
 #[cfg(test)]
 use omnifs_core::{FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRuntime};
 use omnifs_core::{FilesystemSpec, ResourceName};
+use omnifs_vfs::OMNIFS_ATTACH_ADDR_ENV;
 
 use super::{ContainerName, DockerTarget};
 use crate::fs_runtime::{BUILD_CHANNEL, BuildChannel, ImageRef};

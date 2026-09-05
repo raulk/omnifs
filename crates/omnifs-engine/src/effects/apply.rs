@@ -10,6 +10,7 @@ use crate::cache::{
 use crate::clock::{DYNAMIC_TTL_MILLIS, freshness_expiry};
 use crate::object_id::ObjectId;
 use crate::ops::namespace::{DirEntry, DirListing, ListOutcome, ReadBytes, ReadOutcome};
+use crate::ops::validate::{ValidatedEffects, ValidatedInvalidation};
 use crate::view::{
     AttrPayload, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
     LookupPayload, Stability,
@@ -54,22 +55,22 @@ impl<'a> EffectApplier<'a> {
         Self { store }
     }
 
-    pub(crate) fn lower_effects(
+    pub(crate) fn lower_validated(
         &self,
-        effects: &wit_types::Effects,
+        effects: &ValidatedEffects<'_>,
         now_millis: u64,
     ) -> anyhow::Result<ProjectionTransition> {
         let mut transition = ProjectionTransition::default();
         for canonical in &effects.canonical {
             transition.objects.push(ObjectMutation::Canonical {
-                id: ObjectId::from_wit(&canonical.id).as_bytes().to_vec(),
-                bytes: canonical.bytes.clone(),
-                validator: canonical.validator.clone(),
+                id: canonical.id.clone(),
+                bytes: canonical.source.bytes.clone(),
+                validator: canonical.source.validator.clone(),
             });
             for alias in &canonical.view_leaves {
                 transition.objects.push(ObjectMutation::Index {
-                    id: ObjectId::from_wit(&canonical.id).as_bytes().to_vec(),
-                    alias: Path::parse(alias).map_err(anyhow::Error::from)?,
+                    id: canonical.id.clone(),
+                    alias: alias.clone(),
                 });
             }
         }
@@ -77,12 +78,12 @@ impl<'a> EffectApplier<'a> {
         let mut children = BTreeMap::<Path, BTreeMap<String, DirentRecord>>::new();
         let mut directory_exhaustive = BTreeMap::<Path, bool>::new();
         for write in &effects.fs {
-            let path = Path::parse(&write.path).map_err(anyhow::Error::from)?;
-            let meta = match &write.kind {
+            let path = &write.path;
+            let meta = match &write.source.kind {
                 wit_types::FsKind::Directory(_) => EntryMeta::directory(),
                 wit_types::FsKind::File(file) => EntryMeta::file(self.file_meta(file)?),
             };
-            self.add_entry_records(&mut transition, &path, &meta, &write.kind)?;
+            self.add_entry_records(&mut transition, path, &meta, &write.source.kind)?;
             if let Some((parent, name)) = path.parent_and_name() {
                 children.entry(parent).or_default().insert(
                     name.to_string(),
@@ -94,14 +95,14 @@ impl<'a> EffectApplier<'a> {
             }
             if let Some(id) = &write.id {
                 transition.objects.push(ObjectMutation::Index {
-                    id: ObjectId::from_wit(id).as_bytes().to_vec(),
-                    alias: path.clone(),
+                    id: id.clone(),
+                    alias: (*path).clone(),
                 });
             }
-            if let wit_types::FsKind::Directory(exhaustive) = &write.kind {
+            if let wit_types::FsKind::Directory(exhaustive) = &write.source.kind {
                 directory_exhaustive.insert(path.clone(), *exhaustive);
                 transition.freshness.push(Freshness {
-                    path,
+                    path: path.clone(),
                     expires_at: freshness_expiry(
                         stability_from_wit(wit_types::Stability::Dynamic),
                         now_millis,
@@ -119,14 +120,10 @@ impl<'a> EffectApplier<'a> {
         }
         for invalidation in &effects.invalidations {
             transition.invalidations.push(match invalidation {
-                wit_types::Invalidation::Object(id) => {
-                    Invalidation::Object(ObjectId::from_wit(id).as_bytes().to_vec())
-                },
-                wit_types::Invalidation::Listing(wit_types::PathOrPrefix::Path(path)) => {
-                    Invalidation::ListingPath(Path::parse(path).map_err(anyhow::Error::from)?)
-                },
-                wit_types::Invalidation::Listing(wit_types::PathOrPrefix::Prefix(path)) => {
-                    Invalidation::ListingPrefix(Path::parse(path).map_err(anyhow::Error::from)?)
+                ValidatedInvalidation::Object(id) => Invalidation::Object(id.clone()),
+                ValidatedInvalidation::ListingPath(path) => Invalidation::ListingPath(path.clone()),
+                ValidatedInvalidation::ListingPrefix(path) => {
+                    Invalidation::ListingPrefix(path.clone())
                 },
             });
         }

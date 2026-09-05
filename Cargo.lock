@@ -4859,6 +4859,7 @@ dependencies = [
  "omnifs-libkrun",
  "omnifs-nfs",
  "omnifs-provider",
+ "omnifs-vfs",
  "omnifs-wit",
  "rusqlite",
  "serde",
@@ -5120,7 +5121,6 @@ name = "omnifs-vfs"
 version = "0.2.1"
 dependencies = [
  "futures",
- "omnifs-api",
  "omnifs-core",
  "postcard",
  "serde",

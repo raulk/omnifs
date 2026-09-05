@@ -106,6 +106,8 @@ pub enum BuildError {
 pub enum EngineError {
     #[error("wasmtime: {0}")]
     Wasmtime(#[from] wasmtime::Error),
+    #[error("provider admission rejected: {0}")]
+    ProviderAdmission(String),
     #[error("provider protocol: {0}")]
     ProviderProtocol(String),
     #[error("provider returned error: {0:?}")]
@@ -173,7 +175,9 @@ impl From<EngineError> for BuildError {
     fn from(err: EngineError) -> Self {
         match err {
             EngineError::Wasmtime(e) => Self::Wasmtime(e),
-            EngineError::ProviderProtocol(msg) => Self::ProviderProtocol(msg),
+            EngineError::ProviderAdmission(msg) | EngineError::ProviderProtocol(msg) => {
+                Self::ProviderProtocol(msg)
+            },
             EngineError::ProviderError(e) => {
                 Self::ProviderProtocol(format!("provider error during build: {e:?}"))
             },
@@ -243,15 +247,14 @@ impl Runtime {
         )?;
 
         let (init_result, initialize_effects) = instance.initialize().map_err(BuildError::from)?;
-        op_validate::validate_initialize(&init_result, &initialize_effects, |_| false).map_err(
-            |message| {
-                BuildError::ProviderProtocol(format!(
-                    "initialize returned invalid result: {message}"
-                ))
-            },
-        )?;
-        let initialize_effects = init_result
-            .map(|()| initialize_effects)
+        let validated_effects =
+            op_validate::validate_initialize(&init_result, &initialize_effects, |_| false)
+                .map_err(|message| {
+                    BuildError::ProviderProtocol(format!(
+                        "initialize returned invalid result: {message}"
+                    ))
+                })?;
+        init_result
             .map_err(EngineError::ProviderError)
             .map_err(BuildError::from)?;
         let git = git::GitExecutor::new(cloner, Arc::clone(&authority), trees.clone(), mount_name);
@@ -280,8 +283,8 @@ impl Runtime {
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),
         };
-        let transition = crate::effect_apply::EffectApplier::new(&runtime.resources)
-            .lower_effects(&initialize_effects, clock::now_millis())
+        let transition = validated_effects
+            .lower(&runtime.resources, clock::now_millis())
             .map_err(|error| BuildError::ProviderProtocol(error.to_string()))?;
         if publish_initialize_effects {
             runtime

@@ -47,6 +47,15 @@ pub use server::{Endpoint, ListenerEvent, Session, VfsServer, serve_connection};
 #[cfg(feature = "wire")]
 pub const PROTOCOL: u32 = 11;
 
+/// Environment name carrying the TCP or vsock attach target for a filesystem
+/// runner.
+#[cfg(feature = "wire")]
+pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
+
+/// Environment name carrying the libkrun guest readiness vsock port.
+#[cfg(feature = "wire")]
+pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
+
 #[cfg(feature = "wire")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum ServerControl {

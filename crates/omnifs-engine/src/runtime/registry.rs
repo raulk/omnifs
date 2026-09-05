@@ -30,7 +30,10 @@ pub struct MountEntry {
     provider_interval_secs: u32,
 }
 
-/// Daemon-supplied, already-validated input for one durable mount.
+/// Daemon-supplied input for one durable mount.
+///
+/// `MountTable` validates the provider identity and manifest at its private
+/// construction boundary before it starts cache or runtime work.
 pub struct MountBuildInput {
     pub config: RuntimeMountConfig,
     pub canonical: Arc<[u8]>,
@@ -50,6 +53,44 @@ pub enum MountBuildState {
     },
     AuthRequired,
     ProviderUnavailable,
+}
+
+/// Mount input after provider facts have been checked against the mount pin.
+/// Keeping this type private makes it impossible for the build path to skip
+/// validation while preserving the public daemon-facing input shape.
+struct ValidatedMountBuildInput {
+    config: RuntimeMountConfig,
+    canonical: Arc<[u8]>,
+    provider: Option<ProviderBuildInput>,
+    state: MountBuildState,
+}
+
+impl TryFrom<MountBuildInput> for ValidatedMountBuildInput {
+    type Error = RegistryError;
+
+    fn try_from(input: MountBuildInput) -> Result<Self, Self::Error> {
+        let MountBuildInput {
+            config,
+            canonical,
+            provider,
+            state,
+        } = input;
+        if !matches!(state, MountBuildState::ProviderUnavailable) {
+            let retained = provider.as_ref().ok_or_else(|| {
+                RegistryError::RuntimeError(format!(
+                    "mount {} has no retained provider artifact",
+                    config.name
+                ))
+            })?;
+            validate_provider_input(&config, &retained.bytes, &retained.manifest)?;
+        }
+        Ok(Self {
+            config,
+            canonical,
+            provider,
+            state,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +144,10 @@ impl MountTable {
         let (timer_shutdown, _) = watch::channel(false);
         let built = inputs
             .into_iter()
-            .map(|input| Self::build_durable_mount(host, input, capture_test_callouts))
+            .map(|input| {
+                let input = ValidatedMountBuildInput::try_from(input)?;
+                Self::build_durable_mount(host, input, capture_test_callouts)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         validate_auth_bindings(&built)?;
         let entries = built
@@ -121,10 +165,10 @@ impl MountTable {
 
     fn build_durable_mount(
         host: &HostOnline,
-        input: MountBuildInput,
+        input: ValidatedMountBuildInput,
         capture_test_callouts: bool,
     ) -> Result<MountEntry, RegistryError> {
-        let MountBuildInput {
+        let ValidatedMountBuildInput {
             config,
             canonical,
             provider,
@@ -141,14 +185,6 @@ impl MountTable {
                 (MountAvailability::ProviderUnavailable, None, None)
             },
         };
-        if availability != MountAvailability::ProviderUnavailable {
-            let provider = provider.as_ref().ok_or_else(|| {
-                RegistryError::RuntimeError(format!(
-                    "mount {mount} has no retained provider artifact"
-                ))
-            })?;
-            validate_provider_input(&config, &provider.bytes, &provider.manifest)?;
-        }
         let source = generation_cache_source(&canonical, credential_generation);
         let projection_id = ProjectionId::new(&source, config.provider.id);
         let resources = host

@@ -33,7 +33,7 @@ pub(crate) mod tools;
 pub(crate) mod tree;
 #[cfg(feature = "runtime")]
 pub(crate) mod tree_refs;
-pub mod view;
+mod view;
 
 #[cfg(feature = "runtime")]
 pub use callouts::cloner::{CloneError, GitCloner};

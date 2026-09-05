@@ -1,11 +1,16 @@
 use crate::host_control::{HostControl, RunnerPhase, StopOutcome, StopRequest};
+use anyhow::Context as _;
 use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
-use omnifs_vfs::{TeardownOutcome, TeardownRequest};
+use omnifs_vfs::{
+    AttachTarget, TeardownOutcome, TeardownRequest, WireNamespace, resolve_ready_vsock_port,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{mpsc, oneshot, watch};
+use tracing::info;
 
 const MOUNT_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -30,6 +35,81 @@ pub(crate) struct LifecycleConfig<'a> {
 pub(crate) struct RunnerControlConfig {
     pub(crate) instance_id: String,
     pub(crate) socket: PathBuf,
+}
+
+pub(crate) struct AttachedRunner {
+    pub(crate) runtime: Runtime,
+    pub(crate) handle: Handle,
+    pub(crate) lifecycle: Lifecycle,
+    pub(crate) namespace: Arc<WireNamespace>,
+    pub(crate) mount_point: PathBuf,
+    pub(crate) ready_port: Option<u32>,
+}
+
+pub(crate) struct AttachPreparation<'a> {
+    pub(crate) filesystem: &'a ResourceName,
+    pub(crate) spec: &'a FilesystemSpec,
+    pub(crate) runtime_instance: String,
+    pub(crate) state_dir: Option<&'a Path>,
+    pub(crate) attach: Option<PathBuf>,
+    pub(crate) runner_control: Option<RunnerControlConfig>,
+    pub(crate) attach_context: &'static str,
+    pub(crate) preflight_context: &'static str,
+}
+
+pub(crate) fn prepare_attach(preparation: AttachPreparation<'_>) -> anyhow::Result<AttachedRunner> {
+    let AttachPreparation {
+        filesystem,
+        spec,
+        runtime_instance,
+        state_dir,
+        attach,
+        runner_control,
+        attach_context,
+        preflight_context,
+    } = preparation;
+    let mount_point = spec.location().to_path_buf();
+    let ready_port =
+        resolve_ready_vsock_port().context("resolve the readiness-beacon vsock port")?;
+    let target = AttachTarget::resolve(attach).context(attach_context)?;
+    let target_label = target.to_string();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build the tokio runtime")?;
+    let handle = runtime.handle().clone();
+    let lifecycle = {
+        let _runtime_guard = runtime.enter();
+        Lifecycle::prepare(LifecycleConfig {
+            filesystem,
+            spec,
+            state_dir,
+            runner_control,
+        })?
+    };
+    preflight(spec, state_dir).context(preflight_context)?;
+    lifecycle.phase.send_replace(RunnerPhase::Attaching);
+    let namespace = runtime
+        .block_on(WireNamespace::attach_with_teardown(
+            target,
+            filesystem.clone(),
+            spec.clone(),
+            runtime_instance,
+            handle.clone(),
+            lifecycle.wire_teardown_tx.clone(),
+        ))
+        .context("attach to the namespace")?;
+    info!(target = %target_label, "attached to namespace");
+
+    Ok(AttachedRunner {
+        runtime,
+        handle,
+        lifecycle,
+        namespace,
+        mount_point,
+        ready_port,
+    })
 }
 
 impl Lifecycle {

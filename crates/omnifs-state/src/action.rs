@@ -103,6 +103,59 @@ pub enum ActionWriteError {
     Store(#[from] anyhow::Error),
 }
 
+struct ActionInput {
+    action_id: ActionId,
+    kind: ActionKind,
+    target: ResourceKey,
+    expected_generation: u64,
+    request_digest: ResourceDigest,
+}
+
+enum ActionTarget {
+    Credential(CredentialActionTarget),
+    Filesystem(ResourceName),
+}
+
+enum ActionReservation {
+    Existing(ActionReceipt),
+    Reserved(ReservedAction),
+}
+
+struct ReservedAction {
+    action_id: ActionId,
+    kind: ActionKind,
+    target: ResourceKey,
+    expected_generation: u64,
+    request_digest: ResourceDigest,
+    accepted_generation: u64,
+    resolved_target: ActionTarget,
+}
+
+impl ReservedAction {
+    fn receipt(&self) -> ActionReceipt {
+        ActionReceipt {
+            action_id: self.action_id,
+            kind: self.kind,
+            target: self.target.clone(),
+            action_generation: self.accepted_generation,
+            phase: ActionPhase::Accepted,
+            error_code: None,
+            detail: None,
+        }
+    }
+}
+
+enum ActionGenerationUpdate {
+    Credential {
+        id: CredentialId,
+        generation: u64,
+    },
+    Filesystem {
+        filesystem: ResourceName,
+        generation: u64,
+    },
+}
+
 impl Db<'_> {
     pub(crate) async fn accept_credential_action(
         &mut self,
@@ -121,34 +174,28 @@ impl Db<'_> {
         request: CredentialActionRequest,
         request_digest: ResourceDigest,
     ) -> Result<ActionReceipt, ActionWriteError> {
-        if let Some(receipt) =
-            existing_action(self.raw(), request.action_id, request_digest).await?
-        {
-            return Ok(receipt);
-        }
-        let target = credential_action_target(self.raw(), &request.credential).await?;
-        validate_action_operation(&request, &target)?;
-        if let Some(action_id) =
-            pending_action_for_target(self.raw(), ResourceKind::Credential, &request.credential)
-                .await?
-        {
-            return Err(ActionWriteError::Busy {
-                target: ResourceKey::new(ResourceKind::Credential, request.credential),
-                action_id,
-            });
-        }
-        let actual_generation = credential_action_generation(self.raw(), &target.id).await?;
-        if actual_generation != request.expected_generation {
-            return Err(ActionWriteError::GenerationConflict {
-                target: ResourceKey::new(ResourceKind::Credential, request.credential),
-                expected: request.expected_generation,
-                actual: actual_generation,
-            });
-        }
-        let accepted_generation = actual_generation
-            .checked_add(1)
-            .context("credential action generation exhausted")?;
-        let kind = request.operation.kind();
+        let input = ActionInput {
+            action_id: request.action_id,
+            kind: request.operation.kind(),
+            target: ResourceKey::new(ResourceKind::Credential, request.credential.clone()),
+            expected_generation: request.expected_generation,
+            request_digest,
+        };
+        let reservation = self
+            .reserve_action(input, async |db| {
+                let target = credential_action_target(db.raw(), &request.credential).await?;
+                validate_action_operation(&request, &target)?;
+                Ok(ActionTarget::Credential(target))
+            })
+            .await?;
+        let reservation = match reservation {
+            ActionReservation::Existing(receipt) => return Ok(receipt),
+            ActionReservation::Reserved(reservation) => reservation,
+        };
+        let target_id = match &reservation.resolved_target {
+            ActionTarget::Credential(target) => target.id.clone(),
+            ActionTarget::Filesystem(_) => unreachable!("credential action has filesystem target"),
+        };
         match request.operation {
             CredentialActionOperation::SetMaterial(document) => {
                 self.submit_credential_row(document)
@@ -158,7 +205,7 @@ impl Db<'_> {
             CredentialActionOperation::Revoke => {
                 if let Err(error) = self
                     .begin_credential_revocation_row(
-                        target.id.clone(),
+                        target_id.clone(),
                         request.action_id,
                         Vec::new(),
                     )
@@ -173,32 +220,16 @@ impl Db<'_> {
                 }
             },
         }
-        sqlx::query(
-            "UPDATE credentials SET action_generation = ?4, updated_at = unixepoch() \
-             WHERE provider_name = ?1 AND scheme = ?2 AND account = ?3",
+        let receipt = reservation.receipt();
+        self.commit_action(
+            reservation,
+            ActionGenerationUpdate::Credential {
+                id: target_id,
+                generation: receipt.action_generation,
+            },
+            receipt,
         )
-        .bind(target.id.provider_name())
-        .bind(target.id.scheme())
-        .bind(target.id.account())
-        .bind(sql_int(
-            accepted_generation,
-            "credential action generation",
-        )?)
-        .execute(self.raw())
         .await
-        .context("advance credential action generation")?;
-        let receipt = ActionReceipt {
-            action_id: request.action_id,
-            kind,
-            target: ResourceKey::new(ResourceKind::Credential, request.credential),
-            action_generation: accepted_generation,
-            phase: ActionPhase::Accepted,
-            error_code: None,
-            detail: None,
-        };
-        insert_action(self.raw(), request_digest, &receipt).await?;
-        prune_terminal_actions(self.raw()).await?;
-        Ok(receipt)
     }
 
     pub(crate) async fn accept_filesystem_action(
@@ -218,45 +249,110 @@ impl Db<'_> {
         request: FilesystemActionRequest,
         request_digest: ResourceDigest,
     ) -> Result<ActionReceipt, ActionWriteError> {
+        let input = ActionInput {
+            action_id: request.action_id,
+            kind: ActionKind::RestartFilesystem,
+            target: ResourceKey::new(ResourceKind::Filesystem, request.filesystem.clone()),
+            expected_generation: request.base_action_generation,
+            request_digest,
+        };
+        let reservation = self
+            .reserve_action(input, async |db| {
+                filesystem_action_target(db.raw(), &request.filesystem).await?;
+                Ok(ActionTarget::Filesystem(request.filesystem.clone()))
+            })
+            .await?;
+        let reservation = match reservation {
+            ActionReservation::Existing(receipt) => return Ok(receipt),
+            ActionReservation::Reserved(reservation) => reservation,
+        };
+        let receipt = reservation.receipt();
+        self.commit_action(
+            reservation,
+            ActionGenerationUpdate::Filesystem {
+                filesystem: receipt.target.name.clone(),
+                generation: receipt.action_generation,
+            },
+            receipt,
+        )
+        .await
+    }
+
+    async fn reserve_action(
+        &mut self,
+        input: ActionInput,
+        validate_target: impl AsyncFnOnce(&mut Db<'_>) -> Result<ActionTarget, ActionWriteError>,
+    ) -> Result<ActionReservation, ActionWriteError> {
         if let Some(receipt) =
-            existing_action(self.raw(), request.action_id, request_digest).await?
+            existing_action(self.raw(), input.action_id, input.request_digest).await?
         {
-            return Ok(receipt);
+            return Ok(ActionReservation::Existing(receipt));
         }
-        filesystem_action_target(self.raw(), &request.filesystem).await?;
+        let resolved_target = validate_target(self).await?;
         if let Some(action_id) =
-            pending_action_for_target(self.raw(), ResourceKind::Filesystem, &request.filesystem)
-                .await?
+            pending_action_for_target(self.raw(), input.target.kind, &input.target.name).await?
         {
             return Err(ActionWriteError::Busy {
-                target: ResourceKey::new(ResourceKind::Filesystem, request.filesystem),
+                target: input.target,
                 action_id,
             });
         }
-        let actual_generation =
-            filesystem_action_generation(self.raw(), &request.filesystem).await?;
-        if actual_generation != request.base_action_generation {
+        let actual_generation = action_generation(self.raw(), &resolved_target).await?;
+        if actual_generation != input.expected_generation {
             return Err(ActionWriteError::GenerationConflict {
-                target: ResourceKey::new(ResourceKind::Filesystem, request.filesystem),
-                expected: request.base_action_generation,
+                target: input.target,
+                expected: input.expected_generation,
                 actual: actual_generation,
             });
         }
-        let accepted_generation = actual_generation
-            .checked_add(1)
-            .context("filesystem action generation exhausted")?;
-        persist_filesystem_action_generation(self.raw(), &request.filesystem, accepted_generation)
-            .await?;
-        let receipt = ActionReceipt {
-            action_id: request.action_id,
-            kind: ActionKind::RestartFilesystem,
-            target: ResourceKey::new(ResourceKind::Filesystem, request.filesystem),
-            action_generation: accepted_generation,
-            phase: ActionPhase::Accepted,
-            error_code: None,
-            detail: None,
-        };
-        insert_action(self.raw(), request_digest, &receipt).await?;
+        let accepted_generation =
+            actual_generation
+                .checked_add(1)
+                .context(match input.target.kind {
+                    ResourceKind::Credential => "credential action generation exhausted",
+                    ResourceKind::Filesystem => "filesystem action generation exhausted",
+                    _ => "action generation exhausted",
+                })?;
+        Ok(ActionReservation::Reserved(ReservedAction {
+            action_id: input.action_id,
+            kind: input.kind,
+            target: input.target,
+            expected_generation: input.expected_generation,
+            request_digest: input.request_digest,
+            accepted_generation,
+            resolved_target,
+        }))
+    }
+
+    async fn commit_action(
+        &mut self,
+        reservation: ReservedAction,
+        generation_update: ActionGenerationUpdate,
+        receipt: ActionReceipt,
+    ) -> Result<ActionReceipt, ActionWriteError> {
+        debug_assert!(reservation.accepted_generation > reservation.expected_generation);
+        match generation_update {
+            ActionGenerationUpdate::Credential { id, generation } => {
+                sqlx::query(
+                    "UPDATE credentials SET action_generation = ?4, updated_at = unixepoch() \
+                     WHERE provider_name = ?1 AND scheme = ?2 AND account = ?3",
+                )
+                .bind(id.provider_name())
+                .bind(id.scheme())
+                .bind(id.account())
+                .bind(sql_int(generation, "credential action generation")?)
+                .execute(self.raw())
+                .await
+                .context("advance credential action generation")?;
+            },
+            ActionGenerationUpdate::Filesystem {
+                filesystem,
+                generation,
+            } => {
+                persist_filesystem_action_generation(self.raw(), &filesystem, generation).await?;
+            },
+        }
+        insert_action(self.raw(), reservation.request_digest, &receipt).await?;
         prune_terminal_actions(self.raw()).await?;
         Ok(receipt)
     }
@@ -380,6 +476,20 @@ async fn existing_action(
 struct CredentialActionTarget {
     id: CredentialId,
     provider: ProviderId,
+}
+
+async fn action_generation(
+    connection: &mut SqliteConnection,
+    target: &ActionTarget,
+) -> anyhow::Result<u64> {
+    match target {
+        ActionTarget::Credential(target) => {
+            credential_action_generation(connection, &target.id).await
+        },
+        ActionTarget::Filesystem(filesystem) => {
+            filesystem_action_generation(connection, filesystem).await
+        },
+    }
 }
 
 async fn credential_action_target(
@@ -559,36 +669,22 @@ async fn persist_filesystem_action_generation(
 }
 
 fn filesystem_action_digest(request: &FilesystemActionRequest) -> ResourceDigest {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(ACTION_INPUT_DOMAIN);
-    hasher.update(&[action_kind_tag(ActionKind::RestartFilesystem)]);
-    hasher.update(&[ResourceKind::Filesystem.tag()]);
-    let target = request.filesystem.as_str().as_bytes();
-    hasher.update(
-        u64::try_from(target.len())
-            .expect("resource name length fits u64")
-            .to_be_bytes()
-            .as_slice(),
+    let hasher = action_digest_prefix(
+        ActionKind::RestartFilesystem,
+        ResourceKind::Filesystem,
+        &request.filesystem,
+        request.base_action_generation,
     );
-    hasher.update(target);
-    hasher.update(request.base_action_generation.to_be_bytes().as_slice());
     ResourceDigest::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn action_request_digest(request: &CredentialActionRequest) -> ResourceDigest {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(ACTION_INPUT_DOMAIN);
-    hasher.update(&[action_kind_tag(request.operation.kind())]);
-    hasher.update(&[ResourceKind::Credential.tag()]);
-    let target = request.credential.as_str().as_bytes();
-    hasher.update(
-        u64::try_from(target.len())
-            .expect("resource name length fits u64")
-            .to_be_bytes()
-            .as_slice(),
+    let mut hasher = action_digest_prefix(
+        request.operation.kind(),
+        ResourceKind::Credential,
+        &request.credential,
+        request.expected_generation,
     );
-    hasher.update(target);
-    hasher.update(request.expected_generation.to_be_bytes().as_slice());
     if let CredentialActionOperation::SetMaterial(document) = &request.operation {
         hasher.update(document.provider.as_bytes());
         hasher.update(&[match document.kind {
@@ -609,6 +705,28 @@ fn action_request_digest(request: &CredentialActionRequest) -> ResourceDigest {
         }
     }
     ResourceDigest::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn action_digest_prefix(
+    kind: ActionKind,
+    target_kind: ResourceKind,
+    target: &ResourceName,
+    expected_generation: u64,
+) -> blake3::Hasher {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ACTION_INPUT_DOMAIN);
+    hasher.update(&[action_kind_tag(kind)]);
+    hasher.update(&[target_kind.tag()]);
+    let target = target.as_str().as_bytes();
+    hasher.update(
+        u64::try_from(target.len())
+            .expect("resource name length fits u64")
+            .to_be_bytes()
+            .as_slice(),
+    );
+    hasher.update(target);
+    hasher.update(expected_generation.to_be_bytes().as_slice());
+    hasher
 }
 
 fn hash_string(hasher: &mut blake3::Hasher, value: &str) {

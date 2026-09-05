@@ -694,7 +694,7 @@ fn wire_filesystem(
             tcp_command
                 .env("OMNIFS_HOME", &home_path)
                 .env("RUST_LOG", "warn")
-                .env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, attach.to_string());
+                .env(omnifs_vfs::OMNIFS_ATTACH_ADDR_ENV, attach.to_string());
             filesystem_cmd = tcp_command;
         },
     }

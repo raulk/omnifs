@@ -17,6 +17,7 @@ omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-core = { path = "../omnifs-core" }
 omnifs-provider = { workspace = true }
 omnifs-nfs = { workspace = true }
+omnifs-vfs = { workspace = true, features = ["wire"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-stream = { workspace = true }

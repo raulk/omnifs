@@ -42,13 +42,13 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
-use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
 use omnifs_core::{FILESYSTEM_GUEST_LOCATION, FilesystemRuntime, FilesystemSpec, ResourceName};
 use omnifs_libkrun::{
     ATTACH_BRIDGE_SOCKET_NAME, CONTROL_SOCKET_NAME, ControlSocket, DIAGNOSTIC_LOG_NAME,
     HelperRecord, Installation, PID_FILE_NAME, READY_SOCKET_NAME, ROOT_DISK_NAME, SEED_DISK_NAME,
     SERIAL_LOG_NAME, SSH_SOCKET_NAME,
 };
+use omnifs_vfs::OMNIFS_ATTACH_ADDR_ENV;
 use tokio::io::AsyncReadExt as _;
 
 use crate::fs_runtime::driver::{LaunchRequest, err_after_rollback};

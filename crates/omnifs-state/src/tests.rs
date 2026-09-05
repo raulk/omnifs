@@ -617,6 +617,33 @@ fn resource_set(provider: ProviderId, mount_config: serde_json::Value) -> Normal
     .unwrap()
 }
 
+#[test]
+fn resource_view_indexes_one_exact_revision() {
+    let resources = resource_set(
+        ProviderId::from_wasm_bytes(b"resource-view-provider"),
+        serde_json::json!({}),
+    );
+    let snapshot = ResourceSnapshot {
+        revision: ResourceRevision::new(7),
+        desired_digest: resources.digest(),
+        resources,
+    };
+    let view = ResourceView::at(&snapshot);
+    let provider = ResourceName::new("demo").unwrap();
+    let mount = ResourceName::new("demo-mount").unwrap();
+    assert_eq!(view.revision().get(), 7);
+    assert_eq!(view.provider(&provider).unwrap().name, provider);
+    assert_eq!(view.mount(&mount).unwrap().provider, provider);
+    assert_eq!(view.providers().count(), 1);
+    assert_eq!(view.credentials().count(), 1);
+    assert_eq!(view.mounts().count(), 1);
+    assert!(
+        view.diff(&view)
+            .iter()
+            .all(|change| change.action == omnifs_api::ResourceChangeAction::Unchanged)
+    );
+}
+
 fn filesystem_resource_set(name: ResourceName, spec: FilesystemSpec) -> NormalizedResourceSet {
     NormalizedResourceSet::new(vec![ResourceDefinition::Filesystem(FilesystemDefinition {
         name,

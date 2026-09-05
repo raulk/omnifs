@@ -30,7 +30,10 @@ use tokio::time::{Instant, sleep, timeout};
 
 use crate::frame::{Frame, KIND_CONTROL, KIND_EVENT, KIND_HEARTBEAT, KIND_REQUEST, KIND_RESPONSE};
 use crate::frame::{read_frame, write_frame};
-use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireReply, WireRequest, WireResponse};
+use crate::{
+    Handshake, OMNIFS_ATTACH_ADDR_ENV, PROTOCOL, ServerControl, WireError, WireReply, WireRequest,
+    WireResponse,
+};
 
 /// Deadline for the first attach and each reconnect attempt. A target that
 /// never answers triggers filesystem-owned teardown instead of leaving a mount
@@ -77,7 +80,7 @@ impl AttachTarget {
         if let Some(socket) = attach {
             return Ok(Self::Unix(socket));
         }
-        Self::from_env(std::env::var(omnifs_api::OMNIFS_ATTACH_ADDR_ENV).ok())
+        Self::from_env(std::env::var(OMNIFS_ATTACH_ADDR_ENV).ok())
     }
 
     /// Parse the env-driven target from an explicit value so validation remains
@@ -88,13 +91,13 @@ impl AttachTarget {
     /// the filesystem container's DNS and cannot be resolved by the host CLI.
     fn from_env(addr: Option<String>) -> Result<Self, AttachTargetError> {
         let addr = addr.ok_or(AttachTargetError::Missing {
-            env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+            env: OMNIFS_ATTACH_ADDR_ENV,
         })?;
         if let Some(port) = addr.strip_prefix("vsock:") {
             let port: u32 = port
                 .parse()
                 .map_err(|source| AttachTargetError::InvalidVsockPort {
-                    env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+                    env: OMNIFS_ATTACH_ADDR_ENV,
                     addr: addr.clone(),
                     source,
                 })?;
@@ -105,7 +108,7 @@ impl AttachTarget {
             .is_none_or(|(_, port)| port.parse::<u16>().is_err())
         {
             return Err(AttachTargetError::InvalidAddr {
-                env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+                env: OMNIFS_ATTACH_ADDR_ENV,
                 addr,
             });
         }
@@ -309,6 +312,17 @@ pub struct WireNamespace {
     _manager: AbortOnDrop,
 }
 
+// Keep each request's expected wire variant at its call site while sharing the
+// corrupt-peer mismatch path.
+macro_rules! expect_response {
+    ($response:expr, $variant:path $(,)?) => {
+        match $response {
+            $variant(answer) => answer,
+            _ => Err(variant_mismatch()),
+        }
+    };
+}
+
 impl WireNamespace {
     /// Connect to the namespace target, perform the handshake, and return a
     /// namespace multiplexed over the connection. The filesystem name, exact
@@ -396,10 +410,10 @@ impl WireNamespace {
     }
 
     async fn read_request(&self, path: Path, offset: u64, len: u32) -> Result<ReadAnswer, NsError> {
-        match self.call(WireRequest::Read { path, offset, len }).await? {
-            WireResponse::Read(answer) => answer,
-            _ => Err(variant_mismatch()),
-        }
+        expect_response!(
+            self.call(WireRequest::Read { path, offset, len }).await?,
+            WireResponse::Read
+        )
     }
 }
 
@@ -419,39 +433,34 @@ impl Namespace for WireNamespace {
     ) -> BoxFuture<'a, Result<LookupAnswer, NsError>> {
         let name = name.to_string();
         async move {
-            let answer = match self
-                .call(WireRequest::Lookup {
+            expect_response!(
+                self.call(WireRequest::Lookup {
                     parent,
                     name: name.clone(),
                 })
-                .await?
-            {
-                WireResponse::Lookup(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(answer)
+                .await?,
+                WireResponse::Lookup,
+            )
         }
         .boxed()
     }
 
     fn getattr(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            let attrs = match self.call(WireRequest::Getattr { path }).await? {
-                WireResponse::Getattr(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(attrs)
+            expect_response!(
+                self.call(WireRequest::Getattr { path }).await?,
+                WireResponse::Getattr
+            )
         }
         .boxed()
     }
 
     fn getattr_exact(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            let attrs = match self.call(WireRequest::GetattrExact { path }).await? {
-                WireResponse::GetattrExact(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(attrs)
+            expect_response!(
+                self.call(WireRequest::GetattrExact { path }).await?,
+                WireResponse::GetattrExact,
+            )
         }
         .boxed()
     }
@@ -463,18 +472,15 @@ impl Namespace for WireNamespace {
         budget: usize,
     ) -> BoxFuture<'_, Result<DirPage, NsError>> {
         async move {
-            let page = match self
-                .call(WireRequest::Readdir {
+            expect_response!(
+                self.call(WireRequest::Readdir {
                     path,
                     cursor,
                     budget: budget as u64,
                 })
-                .await?
-            {
-                WireResponse::Readdir(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(page)
+                .await?,
+                WireResponse::Readdir,
+            )
         }
         .boxed()
     }
@@ -490,10 +496,10 @@ impl Namespace for WireNamespace {
 
     fn readlink(&self, path: Path) -> BoxFuture<'_, Result<PathBuf, NsError>> {
         async move {
-            match self.call(WireRequest::Readlink { path }).await? {
-                WireResponse::Readlink(answer) => answer,
-                _ => Err(variant_mismatch()),
-            }
+            expect_response!(
+                self.call(WireRequest::Readlink { path }).await?,
+                WireResponse::Readlink
+            )
         }
         .boxed()
     }

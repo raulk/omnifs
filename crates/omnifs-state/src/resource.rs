@@ -7,7 +7,8 @@ use crate::db::Db;
 use crate::row::{RowExt as _, sql_int};
 use anyhow::Context as _;
 use omnifs_api::{
-    ApplyReceipt, FilesystemDefinition, NormalizedResourceSet, ResourceChangeAction,
+    ApplyReceipt, CredentialDefinition, FilesystemDefinition, MountResourceDefinition,
+    NormalizedResourceSet, ProviderDefinition, ResourceChange, ResourceChangeAction,
     ResourceDefinition, plan,
 };
 use omnifs_core::{
@@ -28,6 +29,97 @@ pub struct ResourceSnapshot {
     pub revision: ResourceRevision,
     pub desired_digest: ResourceDigest,
     pub resources: NormalizedResourceSet,
+}
+
+/// Exact-revision lookup view over one desired-state snapshot.
+///
+/// The view owns the indexes for all resource kinds, while definitions remain
+/// borrowed from the normalized set. A view created for another revision has
+/// the same type, so callers must use `diff` when comparing desired states
+/// instead of inventing separate current/desired wrappers.
+pub struct ResourceView<'a> {
+    snapshot: &'a ResourceSnapshot,
+    providers: BTreeMap<ResourceName, &'a ProviderDefinition>,
+    credentials: BTreeMap<ResourceName, &'a CredentialDefinition>,
+    mounts: BTreeMap<ResourceName, &'a MountResourceDefinition>,
+}
+
+impl<'a> ResourceView<'a> {
+    /// Construct a view from one exact-revision snapshot.
+    #[must_use]
+    pub fn at(snapshot: &'a ResourceSnapshot) -> Self {
+        let mut providers = BTreeMap::new();
+        let mut credentials = BTreeMap::new();
+        let mut mounts = BTreeMap::new();
+        for resource in snapshot.resources.resources() {
+            match resource {
+                ResourceDefinition::Provider(provider) => {
+                    providers.insert(provider.name.clone(), provider);
+                },
+                ResourceDefinition::Credential(credential) => {
+                    credentials.insert(credential.name.clone(), credential);
+                },
+                ResourceDefinition::Mount(mount) => {
+                    mounts.insert(mount.name.clone(), mount);
+                },
+                ResourceDefinition::Filesystem(_) => {},
+            }
+        }
+        Self {
+            snapshot,
+            providers,
+            credentials,
+            mounts,
+        }
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> ResourceRevision {
+        self.snapshot.revision
+    }
+
+    #[must_use]
+    pub const fn desired_digest(&self) -> ResourceDigest {
+        self.snapshot.desired_digest
+    }
+
+    #[must_use]
+    pub fn resources(&self) -> &[ResourceDefinition] {
+        self.snapshot.resources.resources()
+    }
+
+    #[must_use]
+    pub fn provider(&self, name: &ResourceName) -> Option<&ProviderDefinition> {
+        self.providers.get(name).copied()
+    }
+
+    #[must_use]
+    pub fn credential(&self, name: &ResourceName) -> Option<&CredentialDefinition> {
+        self.credentials.get(name).copied()
+    }
+
+    #[must_use]
+    pub fn mount(&self, name: &ResourceName) -> Option<&MountResourceDefinition> {
+        self.mounts.get(name).copied()
+    }
+
+    pub fn providers(&self) -> impl Iterator<Item = &ProviderDefinition> {
+        self.providers.values().copied()
+    }
+
+    pub fn credentials(&self) -> impl Iterator<Item = &CredentialDefinition> {
+        self.credentials.values().copied()
+    }
+
+    pub fn mounts(&self) -> impl Iterator<Item = &MountResourceDefinition> {
+        self.mounts.values().copied()
+    }
+
+    /// Compare two views without losing either side's revision identity.
+    #[must_use]
+    pub fn diff(&self, desired: &Self) -> Vec<ResourceChange> {
+        plan(&self.snapshot.resources, &desired.snapshot.resources)
+    }
 }
 
 struct StoredResources {

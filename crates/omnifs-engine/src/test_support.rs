@@ -95,8 +95,10 @@ pub mod cache {
         let retry_fence = effects.invalidations.is_empty();
         let mut epoch = captured_epoch;
         for _ in 0..3 {
-            let transition = crate::effect_apply::EffectApplier::new(&runtime.resources)
-                .lower_effects(effects, crate::clock::now_millis())
+            let validated_effects = crate::op_validate::validate_event(&Ok(()), effects, |_| true)
+                .map_err(crate::EngineError::ProviderProtocol)?;
+            let transition = validated_effects
+                .lower(&runtime.resources, crate::clock::now_millis())
                 .map_err(|error| {
                     crate::EngineError::ProviderProtocol(format!(
                         "cache publication failed: {error}"

@@ -50,7 +50,7 @@ pub use provider::{
 };
 pub use resource::{
     CredentialSecretSidecar, DesiredFilesystem, ResourceApplyError, ResourceApplyRequest,
-    ResourceSnapshot,
+    ResourceSnapshot, ResourceView,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

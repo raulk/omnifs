@@ -8,9 +8,7 @@ use crate::{
     error::{ErrorVerdict, ExitCode},
     rpc::RpcClient,
 };
-use omnifs_api::{
-    ActionPhase, ProgressTarget, ResourceDefinition, ResourcePhase, ResourceSnapshot,
-};
+use omnifs_api::{ActionPhase, ProgressTarget, ResourcePhase, ResourceSnapshot};
 use omnifs_core::{ActionId, ResourceKind, ResourceName, ResourceRevision};
 use serde::Serialize;
 
@@ -76,20 +74,20 @@ pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
     } else {
         report.exit_code()
     };
+    let resource_rows = resources
+        .as_ref()
+        .map_or_else(Vec::new, derive_resource_rows);
     if output.is_structured() {
         let verdict = if exit_code == ExitCode::Success {
             ResultVerdict::Ok
         } else {
             ResultVerdict::Degraded
         };
-        output.emit_result(
-            verdict,
-            StatusResult::new(report.inventory, resources.as_ref()),
-        )?;
+        output.emit_result(verdict, StatusResult::new(report.inventory, resource_rows))?;
     } else {
         output.report(format!("{}\n", report.render().render()));
         if let Some(snapshot) = &resources {
-            output.report(render_resources(snapshot));
+            output.report(render_resources(snapshot, &resource_rows));
         }
         if let Some(action) = report.closing_action() {
             output.narrate("");
@@ -212,7 +210,7 @@ struct StatusResult {
 }
 
 impl StatusResult {
-    fn new(inventory: crate::inventory::Inventory, snapshot: Option<&ResourceSnapshot>) -> Self {
+    fn new(inventory: crate::inventory::Inventory, rows: Vec<ResourceRow>) -> Self {
         let mut result = Self {
             inventory,
             providers: Vec::new(),
@@ -220,28 +218,12 @@ impl StatusResult {
             mounts: Vec::new(),
             filesystems: Vec::new(),
         };
-        let Some(snapshot) = snapshot else {
-            return result;
-        };
-        for resource in &snapshot.resources {
-            let key = resource.key();
-            let status = snapshot
-                .resource_statuses
-                .iter()
-                .find(|status| status.key == key);
-            let row = ResourceRow {
-                name: resource.name().clone(),
-                phase: status.map_or(ResourcePhase::Pending, |status| status.phase),
-                desired_revision: status
-                    .map_or(snapshot.revision, |status| status.desired_revision),
-                observed_revision: status.and_then(|status| status.observed_revision),
-                detail: status.and_then(|status| status.detail.clone()),
-            };
-            match resource {
-                ResourceDefinition::Provider(_) => result.providers.push(row),
-                ResourceDefinition::Credential(_) => result.credentials.push(row),
-                ResourceDefinition::Mount(_) => result.mounts.push(row),
-                ResourceDefinition::Filesystem(_) => result.filesystems.push(row),
+        for row in rows {
+            match row.kind {
+                ResourceKind::Provider => result.providers.push(row),
+                ResourceKind::Credential => result.credentials.push(row),
+                ResourceKind::Mount => result.mounts.push(row),
+                ResourceKind::Filesystem => result.filesystems.push(row),
             }
         }
         result
@@ -251,6 +233,8 @@ impl StatusResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ResourceRow {
+    #[serde(skip)]
+    kind: ResourceKind,
     name: ResourceName,
     phase: ResourcePhase,
     desired_revision: ResourceRevision,
@@ -258,7 +242,30 @@ struct ResourceRow {
     detail: Option<String>,
 }
 
-fn render_resources(snapshot: &ResourceSnapshot) -> String {
+fn derive_resource_rows(snapshot: &ResourceSnapshot) -> Vec<ResourceRow> {
+    snapshot
+        .resources
+        .iter()
+        .map(|resource| {
+            let key = resource.key();
+            let status = snapshot
+                .resource_statuses
+                .iter()
+                .find(|status| status.key == key);
+            ResourceRow {
+                kind: resource.kind(),
+                name: resource.name().clone(),
+                phase: status.map_or(ResourcePhase::Pending, |status| status.phase),
+                desired_revision: status
+                    .map_or(snapshot.revision, |status| status.desired_revision),
+                observed_revision: status.and_then(|status| status.observed_revision),
+                detail: status.and_then(|status| status.detail.clone()),
+            }
+        })
+        .collect()
+}
+
+fn render_resources(snapshot: &ResourceSnapshot, rows: &[ResourceRow]) -> String {
     use crate::ui::table::{
         Block, Cell, Column, Priority, Report, ResourceRow as TableRow, ResourceTable, StateToken,
         WidthPolicy,
@@ -282,22 +289,15 @@ fn render_resources(snapshot: &ResourceSnapshot) -> String {
             Column::new("Detail", Priority::Detail, WidthPolicy::Auto),
         ],
     );
-    let mut resources = snapshot.resources.iter().collect::<Vec<_>>();
-    resources.sort_by_key(|resource| resource.key());
-    for resource in resources {
-        let key = resource.key();
-        let status = snapshot
-            .resource_statuses
-            .iter()
-            .find(|status| status.key == key);
-        let phase = status.map_or(ResourcePhase::Pending, |status| status.phase);
-        let desired = status.map_or(snapshot.revision, |status| status.desired_revision);
-        let observed = status
-            .and_then(|status| status.observed_revision)
+    let mut resources = rows.iter().collect::<Vec<_>>();
+    resources.sort_by_key(|row| (row.kind, row.name.clone()));
+    for row in resources {
+        let phase = row.phase;
+        let desired = row.desired_revision;
+        let observed = row
+            .observed_revision
             .map_or_else(|| "-".to_owned(), |revision| revision.to_string());
-        let detail = status
-            .and_then(|status| status.detail.as_deref())
-            .unwrap_or("-");
+        let detail = row.detail.as_deref().unwrap_or("-");
         let state = match phase {
             ResourcePhase::Ready => StateToken::positive(phase_label(phase)),
             ResourcePhase::Failed | ResourcePhase::Blocked => {
@@ -312,8 +312,8 @@ fn render_resources(snapshot: &ResourceSnapshot) -> String {
         };
         table.push(TableRow::new(
             [
-                Cell::new(kind_label(resource.kind())),
-                Cell::new(resource.name().to_string()),
+                Cell::new(kind_label(row.kind)),
+                Cell::new(row.name.to_string()),
                 Cell::state(state.clone()),
                 Cell::new(desired.to_string()),
                 Cell::new(observed),

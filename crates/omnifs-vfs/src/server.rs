@@ -904,22 +904,8 @@ async fn accept_loop(
         Listener::Unix(listener) => loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let namespace = Arc::clone(&namespace);
-                    let sessions = Arc::clone(&sessions);
-                    if connection_tx
-                        .send(Box::pin(async move {
-                            if let Err(error) = serve_connection_with_registry(
-                                namespace,
-                                stream,
-                                Some(sessions),
-                            )
-                            .await
-                            {
-                                tracing::debug!(%error, "wire: connection ended with a protocol error");
-                            }
-                        }))
+                    if !enqueue_connection(stream, &namespace, &sessions, &connection_tx, "unix")
                         .await
-                        .is_err()
                     {
                         break;
                     }
@@ -933,22 +919,8 @@ async fn accept_loop(
         Listener::Tcp(listener) => loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let namespace = Arc::clone(&namespace);
-                    let sessions = Arc::clone(&sessions);
-                    if connection_tx
-                        .send(Box::pin(async move {
-                            if let Err(error) = serve_connection_with_registry(
-                                namespace,
-                                stream,
-                                Some(sessions),
-                            )
-                            .await
-                            {
-                                tracing::debug!(%error, "wire: tcp connection ended with a protocol error");
-                            }
-                        }))
+                    if !enqueue_connection(stream, &namespace, &sessions, &connection_tx, "tcp")
                         .await
-                        .is_err()
                     {
                         break;
                     }
@@ -960,6 +932,32 @@ async fn accept_loop(
             }
         },
     }
+}
+
+/// Enqueue the shared stream-to-session adapter while keeping each listener's
+/// transport label at the call site.
+async fn enqueue_connection<S>(
+    stream: S,
+    namespace: &Arc<dyn ServingNamespace>,
+    sessions: &Arc<Sessions>,
+    connection_tx: &mpsc::Sender<Connection>,
+    transport: &'static str,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let namespace = Arc::clone(namespace);
+    let sessions = Arc::clone(sessions);
+    connection_tx
+        .send(Box::pin(async move {
+            if let Err(error) =
+                serve_connection_with_registry(namespace, stream, Some(sessions)).await
+            {
+                tracing::debug!(%error, transport, "wire: connection ended with a protocol error");
+            }
+        }))
+        .await
+        .is_ok()
 }
 
 fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {

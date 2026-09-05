@@ -143,19 +143,7 @@ impl Profile {
     /// removed.
     pub fn remove_daemon_bootstrap_if(&self, expected: &DaemonIdentity) -> io::Result<bool> {
         let _spawn_lock = self.acquire_spawn_lock()?;
-        let Some(current) = self.read_process_identity_inner()? else {
-            return Ok(false);
-        };
-        if current != *expected {
-            return Ok(false);
-        }
-        match std::fs::remove_file(self.control_socket()) {
-            Ok(()) => {},
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-            Err(error) => return Err(error),
-        }
-        self.remove_process_identity()?;
-        Ok(true)
+        self.remove_bootstrap_if_locked(expected)
     }
 
     /// Bind the fixed local control socket with fail-closed stale-path rules.
@@ -184,6 +172,10 @@ impl Profile {
     /// replacement daemon's files are never removed.
     pub fn remove_published_bootstrap_if(&self, expected: &DaemonIdentity) -> io::Result<bool> {
         let _spawn_lock = self.acquire_spawn_lock_inner()?;
+        self.remove_bootstrap_if_locked(expected)
+    }
+
+    fn remove_bootstrap_if_locked(&self, expected: &DaemonIdentity) -> io::Result<bool> {
         let Some(current) = self.read_process_identity_inner()? else {
             return Ok(false);
         };
