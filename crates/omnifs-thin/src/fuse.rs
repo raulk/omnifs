@@ -3,63 +3,43 @@
 use std::sync::Arc;
 
 use crate::host_control::RunnerPhase;
-use crate::lifecycle::{Lifecycle, LifecycleConfig, coordinate_mount, preflight};
+use crate::lifecycle::{AttachPreparation, AttachedRunner, coordinate_mount, prepare_attach};
 use anyhow::Context as _;
 use omnifs_mtab::StateFile;
 use omnifs_vfs::Namespace;
-use omnifs_vfs::{AttachTarget, WireNamespace, resolve_ready_vsock_port};
 use tracing::info;
 
 pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     crate::init_tracing();
     let crate::RunnerArgs {
-        client_owner,
+        filesystem,
         spec,
+        runtime_instance,
         state_dir,
         attach,
         port,
         host_control,
     } = args;
     anyhow::ensure!(port == 0, "--port is valid only with --protocol nfs");
-    let mount_point = spec.location().to_path_buf();
-
     // Parsed (and platform-checked) before the attach dial, so a
     // misconfigured seed fails fast rather than after a 30s connect attempt.
-    let ready_port =
-        resolve_ready_vsock_port().context("resolve the readiness-beacon vsock port")?;
-    let target = AttachTarget::resolve(attach).context("resolve the namespace attach target")?;
-    let target_label = target.to_string();
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("build the tokio runtime")?;
-    let handle = rt.handle().clone();
-    let runner_control = host_control.into_config()?;
-    let mut lifecycle = {
-        let _runtime_guard = rt.enter();
-        Lifecycle::prepare(LifecycleConfig {
-            spec: &spec,
-            state_dir: state_dir.as_deref(),
-            runner_control,
-        })?
-    };
-    preflight(&spec, state_dir.as_deref()).context("check the FUSE mount location")?;
-    lifecycle.phase.send_replace(RunnerPhase::Attaching);
-
-    let namespace = rt
-        .block_on(WireNamespace::attach_with_teardown(
-            target,
-            client_owner,
-            spec.clone(),
-            handle.clone(),
-            lifecycle.wire_teardown_tx.clone(),
-        ))
-        .context("attach to the namespace")?;
-    info!(
-        target = %target_label,
-        "attached to namespace"
-    );
+    let AttachedRunner {
+        runtime: rt,
+        handle,
+        mut lifecycle,
+        namespace,
+        mount_point,
+        ready_port,
+    } = prepare_attach(AttachPreparation {
+        filesystem: &filesystem,
+        spec: &spec,
+        runtime_instance,
+        state_dir: state_dir.as_deref(),
+        attach,
+        runner_control: host_control.into_config()?,
+        attach_context: "resolve the namespace attach target",
+        preflight_context: "check the FUSE mount location",
+    })?;
 
     if let Some(port) = ready_port {
         omnifs_vfs::spawn_ready_signal(&handle, mount_point.clone(), port);

@@ -11,6 +11,7 @@ use std::future::Future;
 use std::path::{Component as PathComponent, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::authority::RuntimeAuthority;
 use crate::callouts::{CalloutHost, ParkSignal};
@@ -25,10 +26,60 @@ use crate::wasi::HostState;
 use crate::{BuildError, EngineError};
 use omnifs_wit::host::types as wit_types;
 
+const COMMAND_QUEUE_CAPACITY: usize = 64;
+const MAX_IN_FLIGHT_OPERATIONS: usize = 32;
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Clone)]
 pub struct Instance {
-    tx: tokio::sync::mpsc::UnboundedSender<Command>,
+    tx: tokio::sync::mpsc::Sender<Command>,
+    admission: Arc<tokio::sync::Semaphore>,
+    shutting_down: Arc<std::sync::atomic::AtomicBool>,
     config_bytes: Vec<u8>,
+}
+
+struct OperationEnvelope<C, R> {
+    command: C,
+    span: tracing::Span,
+    reply: tokio::sync::oneshot::Sender<R>,
+    cancel: tokio::sync::oneshot::Receiver<()>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct LookupChildCommand {
+    id: u64,
+    parent_path: String,
+    name: String,
+}
+
+struct ListChildrenCommand {
+    id: u64,
+    path: String,
+    cursor: Option<wit_types::Cursor>,
+}
+
+struct ReadFileCommand {
+    id: u64,
+    path: String,
+    content_type: String,
+    cached_canonical: Option<wit_types::CanonicalInput>,
+}
+
+struct OpenFileCommand {
+    id: u64,
+    path: String,
+}
+
+struct ReadChunkCommand {
+    id: u64,
+    handle: u64,
+    offset: u64,
+    length: u32,
+}
+
+struct EventCommand {
+    id: u64,
+    event: wit_types::ProviderEvent,
 }
 
 enum Command {
@@ -40,48 +91,12 @@ enum Command {
         config_bytes: Vec<u8>,
         reply: std::sync::mpsc::Sender<InitializeTransport>,
     },
-    LookupChild {
-        id: u64,
-        parent_path: String,
-        name: String,
-        span: tracing::Span,
-        reply: tokio::sync::oneshot::Sender<LookupTransport>,
-    },
-    ListChildren {
-        id: u64,
-        path: String,
-        cursor: Option<wit_types::Cursor>,
-        span: tracing::Span,
-        reply: tokio::sync::oneshot::Sender<ListTransport>,
-    },
-    ReadFile {
-        id: u64,
-        path: String,
-        content_type: String,
-        cached_canonical: Option<wit_types::CanonicalInput>,
-        span: tracing::Span,
-        reply: tokio::sync::oneshot::Sender<ReadTransport>,
-    },
-    OpenFile {
-        id: u64,
-        path: String,
-        span: tracing::Span,
-        reply: tokio::sync::oneshot::Sender<OpenTransport>,
-    },
-    ReadChunk {
-        id: u64,
-        handle: u64,
-        offset: u64,
-        length: u32,
-        span: tracing::Span,
-        reply: tokio::sync::oneshot::Sender<ChunkTransport>,
-    },
-    OnEvent {
-        id: u64,
-        event: wit_types::ProviderEvent,
-        span: tracing::Span,
-        reply: tokio::sync::oneshot::Sender<EventTransport>,
-    },
+    LookupChild(OperationEnvelope<LookupChildCommand, LookupTransport>),
+    ListChildren(OperationEnvelope<ListChildrenCommand, ListTransport>),
+    ReadFile(OperationEnvelope<ReadFileCommand, ReadTransport>),
+    OpenFile(OperationEnvelope<OpenFileCommand, OpenTransport>),
+    ReadChunk(OperationEnvelope<ReadChunkCommand, ChunkTransport>),
+    OnEvent(OperationEnvelope<EventCommand, EventTransport>),
     Shutdown {
         reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
     },
@@ -149,7 +164,9 @@ impl Instance {
         authority: Arc<RuntimeAuthority>,
         park_signal: Option<ParkSignal>,
     ) -> std::result::Result<Self, BuildError> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(COMMAND_QUEUE_CAPACITY);
+        let admission = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_OPERATIONS));
+        let shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let engine = engine.clone();
 
@@ -197,7 +214,57 @@ impl Instance {
             BuildError::ProviderProtocol(format!("provider driver did not start: {error}"))
         })??;
 
-        Ok(Self { tx, config_bytes })
+        Ok(Self {
+            tx,
+            admission,
+            shutting_down,
+            config_bytes,
+        })
+    }
+
+    async fn submit<C, T>(
+        &self,
+        command: C,
+        build: impl FnOnce(OperationEnvelope<C, T>) -> Command,
+    ) -> std::result::Result<T, EngineError>
+    where
+        C: Send + 'static,
+        T: Send + 'static,
+    {
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(EngineError::ProviderAdmission(
+                "provider runtime is shutting down".to_owned(),
+            ));
+        }
+        let permit = self.admission.clone().try_acquire_owned().map_err(|_| {
+            EngineError::ProviderAdmission("provider operation in-flight limit reached".to_owned())
+        })?;
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        let (cancel, cancellation) = tokio::sync::oneshot::channel();
+        self.tx
+            .try_send(build(OperationEnvelope {
+                command,
+                span: tracing::Span::current(),
+                reply,
+                cancel: cancellation,
+                permit,
+            }))
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => EngineError::ProviderAdmission(
+                    "provider operation queue capacity reached".to_owned(),
+                ),
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    EngineError::ProviderProtocol("provider instance driver stopped".to_owned())
+                },
+            })?;
+        let result = receive.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_owned())
+        });
+        drop(cancel);
+        result
     }
 
     pub(crate) async fn lookup_child(
@@ -206,21 +273,15 @@ impl Instance {
         parent_path: String,
         name: String,
     ) -> LookupTransport {
-        let (reply, recv) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Command::LookupChild {
+        self.submit(
+            LookupChildCommand {
                 id,
                 parent_path,
                 name,
-                span: tracing::Span::current(),
-                reply,
-            })
-            .map_err(|_| {
-                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
-            })?;
-        recv.await.map_err(|_| {
-            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
-        })?
+            },
+            Command::LookupChild,
+        )
+        .await?
     }
 
     pub(crate) async fn list_children(
@@ -229,21 +290,11 @@ impl Instance {
         path: String,
         cursor: Option<wit_types::Cursor>,
     ) -> ListTransport {
-        let (reply, recv) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Command::ListChildren {
-                id,
-                path,
-                cursor,
-                span: tracing::Span::current(),
-                reply,
-            })
-            .map_err(|_| {
-                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
-            })?;
-        recv.await.map_err(|_| {
-            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
-        })?
+        self.submit(
+            ListChildrenCommand { id, path, cursor },
+            Command::ListChildren,
+        )
+        .await?
     }
 
     pub(crate) async fn read_file(
@@ -253,39 +304,21 @@ impl Instance {
         content_type: String,
         cached_canonical: Option<wit_types::CanonicalInput>,
     ) -> ReadTransport {
-        let (reply, recv) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Command::ReadFile {
+        self.submit(
+            ReadFileCommand {
                 id,
                 path,
                 content_type,
                 cached_canonical,
-                span: tracing::Span::current(),
-                reply,
-            })
-            .map_err(|_| {
-                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
-            })?;
-        recv.await.map_err(|_| {
-            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
-        })?
+            },
+            Command::ReadFile,
+        )
+        .await?
     }
 
     pub(crate) async fn open_file(&self, id: u64, path: String) -> OpenTransport {
-        let (reply, recv) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Command::OpenFile {
-                id,
-                path,
-                span: tracing::Span::current(),
-                reply,
-            })
-            .map_err(|_| {
-                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
-            })?;
-        recv.await.map_err(|_| {
-            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
-        })?
+        self.submit(OpenFileCommand { id, path }, Command::OpenFile)
+            .await?
     }
 
     pub(crate) async fn read_chunk(
@@ -295,22 +328,16 @@ impl Instance {
         offset: u64,
         length: u32,
     ) -> ChunkTransport {
-        let (reply, recv) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Command::ReadChunk {
+        self.submit(
+            ReadChunkCommand {
                 id,
                 handle,
                 offset,
                 length,
-                span: tracing::Span::current(),
-                reply,
-            })
-            .map_err(|_| {
-                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
-            })?;
-        recv.await.map_err(|_| {
-            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
-        })?
+            },
+            Command::ReadChunk,
+        )
+        .await?
     }
 
     pub(crate) async fn on_event(
@@ -318,20 +345,8 @@ impl Instance {
         id: u64,
         event: wit_types::ProviderEvent,
     ) -> EventTransport {
-        let (reply, recv) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Command::OnEvent {
-                id,
-                event,
-                span: tracing::Span::current(),
-                reply,
-            })
-            .map_err(|_| {
-                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
-            })?;
-        recv.await.map_err(|_| {
-            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
-        })?
+        self.submit(EventCommand { id, event }, Command::OnEvent)
+            .await?
     }
 
     pub fn initialize(&self) -> InitializeTransport {
@@ -349,7 +364,13 @@ impl Instance {
     }
 
     pub fn shutdown(&self) -> std::result::Result<(), EngineError> {
-        self.call_sync(|reply| Command::Shutdown { reply })
+        if self
+            .shutting_down
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Ok(());
+        }
+        self.call_sync_unchecked(|reply| Command::Shutdown { reply })
     }
 
     pub fn close_file(&self, handle: u64) -> std::result::Result<(), EngineError> {
@@ -360,10 +381,32 @@ impl Instance {
         &self,
         build: impl FnOnce(std::sync::mpsc::Sender<std::result::Result<T, EngineError>>) -> Command,
     ) -> std::result::Result<T, EngineError> {
+        if self
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(EngineError::ProviderAdmission(
+                "provider runtime is shutting down".to_owned(),
+            ));
+        }
+        self.call_sync_unchecked(build)
+    }
+
+    fn call_sync_unchecked<T>(
+        &self,
+        build: impl FnOnce(std::sync::mpsc::Sender<std::result::Result<T, EngineError>>) -> Command,
+    ) -> std::result::Result<T, EngineError> {
         let (reply, recv) = std::sync::mpsc::channel();
-        self.tx.send(build(reply)).map_err(|_| {
-            EngineError::ProviderProtocol("provider instance driver stopped".to_string())
-        })?;
+        self.tx
+            .try_send(build(reply))
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => EngineError::ProviderAdmission(
+                    "provider control queue capacity reached".to_owned(),
+                ),
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    EngineError::ProviderProtocol("provider instance driver stopped".to_owned())
+                },
+            })?;
         recv.recv().map_err(|_| {
             EngineError::ProviderProtocol("provider instance reply dropped".to_string())
         })?
@@ -400,7 +443,7 @@ async fn build_driver_state(
 async fn drive_instance(
     mut store: wasmtime::Store<HostState>,
     bindings: Provider,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
+    mut rx: tokio::sync::mpsc::Receiver<Command>,
 ) -> wasmtime::Result<()> {
     let bindings = Arc::new(bindings);
     store
@@ -437,78 +480,134 @@ async fn drive_instance(
                                 .map_err(Into::into);
                                 let _ = reply.send(result);
                             },
-                            Command::LookupChild { id, parent_path, name, span, reply } => {
+                            Command::LookupChild(OperationEnvelope {
+                                command: LookupChildCommand { id, parent_path, name },
+                                span,
+                                reply,
+                                cancel,
+                                permit,
+                            }) => {
                                 let namespace = Arc::clone(&bindings);
-                                calls.push(Box::pin(async move {
-                                    let result = namespace
+                                calls.push(Box::pin(run_operation(cancel, reply, permit, async move {
+                                    namespace
                                         .omnifs_provider_namespace()
                                         .call_lookup_child(accessor, id, parent_path, name)
                                         .await
-                                        .map_err(Into::into);
-                                    let _ = reply.send(result);
-                                }.instrument(span)));
+                                        .map_err(Into::into)
+                                }.instrument(span))));
                             },
-                            Command::ListChildren { id, path, cursor, span, reply } => {
+                            Command::ListChildren(OperationEnvelope {
+                                command: ListChildrenCommand { id, path, cursor },
+                                span,
+                                reply,
+                                cancel,
+                                permit,
+                            }) => {
                                 let namespace = Arc::clone(&bindings);
-                                calls.push(Box::pin(async move {
-                                    let result = namespace
+                                calls.push(Box::pin(run_operation(cancel, reply, permit, async move {
+                                    namespace
                                         .omnifs_provider_namespace()
                                         .call_list_children(accessor, id, path, cursor)
                                         .await
-                                        .map_err(Into::into);
-                                    let _ = reply.send(result);
-                                }.instrument(span)));
+                                        .map_err(Into::into)
+                                }.instrument(span))));
                             },
-                            Command::ReadFile { id, path, content_type, cached_canonical, span, reply } => {
+                            Command::ReadFile(OperationEnvelope {
+                                command: ReadFileCommand {
+                                    id,
+                                    path,
+                                    content_type,
+                                    cached_canonical,
+                                },
+                                span,
+                                reply,
+                                cancel,
+                                permit,
+                            }) => {
                                 let namespace = Arc::clone(&bindings);
-                                calls.push(Box::pin(async move {
-                                    let result = namespace
+                                calls.push(Box::pin(run_operation(cancel, reply, permit, async move {
+                                    namespace
                                         .omnifs_provider_namespace()
                                         .call_read_file(accessor, id, path, content_type, cached_canonical)
                                         .await
-                                        .map_err(Into::into);
-                                    let _ = reply.send(result);
-                                }.instrument(span)));
+                                        .map_err(Into::into)
+                                }.instrument(span))));
                             },
-                            Command::OpenFile { id, path, span, reply } => {
+                            Command::OpenFile(OperationEnvelope {
+                                command: OpenFileCommand { id, path },
+                                span,
+                                reply,
+                                cancel,
+                                permit,
+                            }) => {
                                 let namespace = Arc::clone(&bindings);
-                                calls.push(Box::pin(async move {
-                                    let result = namespace
+                                calls.push(Box::pin(run_operation(cancel, reply, permit, async move {
+                                    namespace
                                         .omnifs_provider_namespace()
                                         .call_open_file(accessor, id, path)
                                         .await
-                                        .map_err(Into::into);
-                                    let _ = reply.send(result);
-                                }.instrument(span)));
+                                        .map_err(Into::into)
+                                }.instrument(span))));
                             },
-                            Command::ReadChunk { id, handle, offset, length, span, reply } => {
+                            Command::ReadChunk(OperationEnvelope {
+                                command: ReadChunkCommand {
+                                    id,
+                                    handle,
+                                    offset,
+                                    length,
+                                },
+                                span,
+                                reply,
+                                cancel,
+                                permit,
+                            }) => {
                                 let namespace = Arc::clone(&bindings);
-                                calls.push(Box::pin(async move {
-                                    let result = namespace
+                                calls.push(Box::pin(run_operation(cancel, reply, permit, async move {
+                                    namespace
                                         .omnifs_provider_namespace()
                                         .call_read_chunk(accessor, id, handle, offset, length)
                                         .await
-                                        .map_err(Into::into);
-                                    let _ = reply.send(result);
-                                }.instrument(span)));
+                                        .map_err(Into::into)
+                                }.instrument(span))));
                             },
-                            Command::OnEvent { id, event, span, reply } => {
+                            Command::OnEvent(OperationEnvelope {
+                                command: EventCommand { id, event },
+                                span,
+                                reply,
+                                cancel,
+                                permit,
+                            }) => {
                                 let notify = Arc::clone(&bindings);
-                                calls.push(Box::pin(async move {
-                                    let result = notify
+                                calls.push(Box::pin(run_operation(cancel, reply, permit, async move {
+                                    notify
                                         .omnifs_provider_notify()
                                         .call_on_event(accessor, id, event)
                                         .await
-                                        .map_err(Into::into);
-                                    let _ = reply.send(result);
-                                }.instrument(span)));
+                                        .map_err(Into::into)
+                                }.instrument(span))));
                             },
                             Command::Shutdown { reply } => {
-                                let shutdown = bindings.omnifs_provider_lifecycle().func_shutdown();
-                                let result = shutdown
-                                    .call_concurrent(accessor, ())
-                                    .await
-                                    .map_err(Into::into);
+                                let drained = tokio::time::timeout(
+                                    SHUTDOWN_DRAIN_TIMEOUT,
+                                    async {
+                                        while calls.next().await.is_some() {}
+                                    },
+                                )
+                                .await
+                                .is_ok();
+                                let result = if drained {
+                                    let shutdown =
+                                        bindings.omnifs_provider_lifecycle().func_shutdown();
+                                    shutdown
+                                        .call_concurrent(accessor, ())
+                                        .await
+                                        .map_err(Into::into)
+                                } else {
+                                    Err(EngineError::ProviderProtocol(
+                                        "provider operation drain timed out during shutdown"
+                                            .to_owned(),
+                                    ))
+                                };
                                 let _ = reply.send(result);
                                 break;
                             },
@@ -530,6 +629,22 @@ async fn drive_instance(
             Ok(())
         })
         .await?
+}
+
+async fn run_operation<T, F>(
+    cancel: tokio::sync::oneshot::Receiver<()>,
+    reply: tokio::sync::oneshot::Sender<T>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    operation: F,
+) where
+    F: Future<Output = T>,
+{
+    tokio::select! {
+        result = operation => {
+            let _ = reply.send(result);
+        }
+        _ = cancel => {},
+    }
 }
 
 fn build_wasi_ctx(
@@ -578,6 +693,34 @@ fn validate_preopen_path(raw: &str) -> std::result::Result<PathBuf, BuildError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_operation_drops_reply_and_releases_permit() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let operation = run_operation(cancel_rx, reply_tx, permit, async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            42_u8
+        });
+        cancel_tx.send(()).unwrap();
+        operation.await;
+        assert!(reply_rx.await.is_err());
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn completed_operation_sends_typed_reply() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let (_cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        run_operation(cancel_rx, reply_tx, permit, async { 42_u8 }).await;
+        assert_eq!(reply_rx.await.unwrap(), 42);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
     #[test]
     fn validate_preopen_path_rejects_relative() {
         let err = validate_preopen_path("data/db").unwrap_err();

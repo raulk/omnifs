@@ -332,6 +332,7 @@ impl FileAttrsCache {
 
     /// Cache key used for online file reuse. Unversioned dynamic content must
     /// re-enter the provider on every online read, so it has no reuse key.
+    #[allow(clippy::option_option)] // None=live, Some(None)=unversioned, Some(Some)=versioned.
     pub fn online_cache_aux(&self) -> Option<Option<String>> {
         match self.stability() {
             Stability::Stable => Some(None),
@@ -342,6 +343,7 @@ impl FileAttrsCache {
 
     /// Cache key used for durable observation. Every complete non-live body is
     /// retained for cache-only serving, including unversioned dynamic content.
+    #[allow(clippy::option_option)] // None=live, Some(None)=unversioned, Some(Some)=versioned.
     pub fn durable_observation_cache_aux(&self) -> Option<Option<String>> {
         match self.stability() {
             Stability::Stable | Stability::Dynamic => Some(self.cache_key_aux()),
@@ -656,6 +658,7 @@ impl LookupPayload {
         postcard::to_allocvec(self).ok()
     }
 
+    #[cfg(test)]
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         postcard::from_bytes(bytes).ok()
     }
@@ -671,6 +674,7 @@ impl AttrPayload {
         postcard::to_allocvec(self).ok()
     }
 
+    #[cfg(test)]
     pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         postcard::from_bytes(bytes).ok()
     }
@@ -695,10 +699,6 @@ pub struct DirentsPayload {
 impl DirentsPayload {
     pub fn serialize(&self) -> Option<Vec<u8>> {
         postcard::to_allocvec(self).ok()
-    }
-
-    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
-        postcard::from_bytes(bytes).ok()
     }
 
     #[must_use]

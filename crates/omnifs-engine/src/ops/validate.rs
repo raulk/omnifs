@@ -2,11 +2,55 @@
 
 use std::collections::HashMap;
 
+use crate::cache::{MountResources, ProjectionTransition};
 use crate::object_id::ObjectId;
 use crate::view::{MAX_EAGER_RESPONSE_BYTES, MAX_VERSION_TOKEN_BYTES};
 use crate::wit_protocol::{try_file_attrs_from_attrs, try_file_attrs_from_file_out};
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::host::types as wit_types;
+
+/// Parsed provider effects that have passed the host's effect invariants.
+///
+/// The raw WIT records remain borrowed for payload bytes and file metadata,
+/// while paths and object ids are parsed once for the lowering owner.
+#[derive(Debug)]
+pub(crate) struct ValidatedEffects<'a> {
+    pub(crate) canonical: Vec<ValidatedCanonical<'a>>,
+    pub(crate) fs: Vec<ValidatedFsWrite<'a>>,
+    pub(crate) invalidations: Vec<ValidatedInvalidation>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedCanonical<'a> {
+    pub(crate) source: &'a wit_types::CanonicalStore,
+    pub(crate) id: Vec<u8>,
+    pub(crate) view_leaves: Vec<Path>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedFsWrite<'a> {
+    pub(crate) source: &'a wit_types::FsWrite,
+    pub(crate) path: Path,
+    pub(crate) id: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ValidatedInvalidation {
+    Object(Vec<u8>),
+    ListingPath(Path),
+    ListingPrefix(Path),
+}
+
+impl ValidatedEffects<'_> {
+    /// Lower the parsed effect view without reparsing the raw WIT paths.
+    pub(crate) fn lower(
+        &self,
+        resources: &MountResources,
+        now_millis: u64,
+    ) -> anyhow::Result<ProjectionTransition> {
+        crate::effect_apply::EffectApplier::new(resources).lower_validated(self, now_millis)
+    }
+}
 
 pub(crate) struct ReturnValidator<'a, F> {
     effects: &'a wit_types::Effects,
@@ -30,13 +74,13 @@ where
         result: &std::result::Result<T, wit_types::ProviderError>,
         effects: &'a wit_types::Effects,
         tree_exists: F,
-    ) -> std::result::Result<Self, String> {
+    ) -> std::result::Result<(Self, ValidatedEffects<'a>), String> {
         if result.is_err() && !effects_empty(effects) {
             return Err("provider error returns must not carry effects".to_string());
         }
         let mut validator = Self::new(effects, tree_exists);
-        validator.effects()?;
-        Ok(validator)
+        let parsed = validator.effects()?;
+        Ok((validator, parsed))
     }
 
     pub(crate) fn lookup(
@@ -111,10 +155,12 @@ where
         Ok(())
     }
 
-    fn effects(&mut self) -> std::result::Result<(), String> {
+    #[allow(clippy::too_many_lines)]
+    fn effects(&mut self) -> std::result::Result<ValidatedEffects<'a>, String> {
         let effects = self.effects;
         let mut canonical_path_to_id: HashMap<String, Vec<u8>> = HashMap::new();
         let mut fs_path_to_id: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut canonical = Vec::with_capacity(effects.canonical.len());
         for store in &effects.canonical {
             if store.id.kind.is_empty() {
                 return Err("canonical-store id.kind must not be empty".to_string());
@@ -123,14 +169,10 @@ where
                 return Err("canonical-store has an empty view-leaves list".to_string());
             }
             let id_bytes = ObjectId::from_wit(&store.id).as_bytes().to_vec();
+            let mut view_leaves = Vec::with_capacity(store.view_leaves.len());
             for leaf in &store.view_leaves {
                 if leaf.is_empty() {
                     return Err("canonical-store has an empty view-leaf".to_string());
-                }
-                if Path::parse(leaf).is_err() {
-                    return Err(format!(
-                        "canonical-store view-leaf {leaf:?} is not a valid protocol path"
-                    ));
                 }
                 let leaf_path = Path::parse(leaf).map_err(|_| {
                     format!("canonical-store view-leaf {leaf:?} is not a valid protocol path")
@@ -141,6 +183,7 @@ where
                     ));
                 }
                 Self::track_unique_path_id(&mut canonical_path_to_id, leaf, &id_bytes)?;
+                view_leaves.push(leaf_path);
             }
             if let Some(token) = &store.validator
                 && token.len() > MAX_VERSION_TOKEN_BYTES
@@ -149,16 +192,15 @@ where
                     "canonical-store validator token exceeds {MAX_VERSION_TOKEN_BYTES} bytes"
                 ));
             }
+            canonical.push(ValidatedCanonical {
+                source: store,
+                id: id_bytes,
+                view_leaves,
+            });
         }
+        let mut fs = Vec::with_capacity(effects.fs.len());
         for write in &effects.fs {
-            let path = Path::parse(&write.path);
-            if path.is_err() {
-                return Err(format!(
-                    "fs-write path {:?} is not a valid protocol path",
-                    write.path
-                ));
-            }
-            let path = path.map_err(|_| {
+            let path = Path::parse(&write.path).map_err(|_| {
                 format!(
                     "fs-write path {:?} is not a valid protocol path",
                     write.path
@@ -179,19 +221,40 @@ where
                 self.file_out(file)
                     .map_err(|e| format!("fs-write {:?}: {e}", write.path))?;
             }
+            fs.push(ValidatedFsWrite {
+                source: write,
+                path,
+                id: write
+                    .id
+                    .as_ref()
+                    .map(|id| ObjectId::from_wit(id).as_bytes().to_vec()),
+            });
         }
+        let mut invalidations = Vec::with_capacity(effects.invalidations.len());
         for invalidation in &effects.invalidations {
-            if let wit_types::Invalidation::Listing(
-                wit_types::PathOrPrefix::Path(p) | wit_types::PathOrPrefix::Prefix(p),
-            ) = invalidation
-                && Path::parse(p).is_err()
-            {
-                return Err(format!(
-                    "invalidation path {p:?} is not a valid protocol path"
-                ));
-            }
+            invalidations.push(match invalidation {
+                wit_types::Invalidation::Object(id) => {
+                    ValidatedInvalidation::Object(ObjectId::from_wit(id).as_bytes().to_vec())
+                },
+                wit_types::Invalidation::Listing(wit_types::PathOrPrefix::Path(path)) => {
+                    let path = Path::parse(path).map_err(|_| {
+                        format!("invalidation path {path:?} is not a valid protocol path")
+                    })?;
+                    ValidatedInvalidation::ListingPath(path)
+                },
+                wit_types::Invalidation::Listing(wit_types::PathOrPrefix::Prefix(path)) => {
+                    let path = Path::parse(path).map_err(|_| {
+                        format!("invalidation path {path:?} is not a valid protocol path")
+                    })?;
+                    ValidatedInvalidation::ListingPrefix(path)
+                },
+            });
         }
-        Ok(())
+        Ok(ValidatedEffects {
+            canonical,
+            fs,
+            invalidations,
+        })
     }
 
     fn subtree_tree(&self, tree: u64) -> std::result::Result<(), String> {
@@ -315,83 +378,86 @@ where
     }
 }
 
-pub(crate) fn validate_lookup<F>(
+pub(crate) fn validate_lookup<'a, F>(
     result: &std::result::Result<wit_types::LookupChildResult, wit_types::ProviderError>,
-    effects: &wit_types::Effects,
+    effects: &'a wit_types::Effects,
     tree_exists: F,
-) -> std::result::Result<(), String>
+) -> std::result::Result<ValidatedEffects<'a>, String>
 where
     F: Fn(u64) -> bool,
 {
-    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.lookup(result)
+    let (mut validator, parsed) = ReturnValidator::common(result, effects, tree_exists)?;
+    validator.lookup(result)?;
+    Ok(parsed)
 }
-pub(crate) fn validate_list<F>(
+pub(crate) fn validate_list<'a, F>(
     result: &std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
-    effects: &wit_types::Effects,
+    effects: &'a wit_types::Effects,
     tree_exists: F,
-) -> std::result::Result<(), String>
+) -> std::result::Result<ValidatedEffects<'a>, String>
 where
     F: Fn(u64) -> bool,
 {
-    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.list(result)
+    let (mut validator, parsed) = ReturnValidator::common(result, effects, tree_exists)?;
+    validator.list(result)?;
+    Ok(parsed)
 }
-pub(crate) fn validate_read<F>(
+pub(crate) fn validate_read<'a, F>(
     result: &std::result::Result<wit_types::ReadFileOutcome, wit_types::ProviderError>,
-    effects: &wit_types::Effects,
+    effects: &'a wit_types::Effects,
     tree_exists: F,
-) -> std::result::Result<(), String>
+) -> std::result::Result<ValidatedEffects<'a>, String>
 where
     F: Fn(u64) -> bool,
 {
-    let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.read(result)
+    let (mut validator, parsed) = ReturnValidator::common(result, effects, tree_exists)?;
+    validator.read(result)?;
+    Ok(parsed)
 }
-pub(crate) fn validate_open<F>(
+pub(crate) fn validate_open<'a, F>(
     result: &std::result::Result<wit_types::OpenFileResult, wit_types::ProviderError>,
-    effects: &wit_types::Effects,
+    effects: &'a wit_types::Effects,
     tree_exists: F,
-) -> std::result::Result<(), String>
+) -> std::result::Result<ValidatedEffects<'a>, String>
 where
     F: Fn(u64) -> bool,
 {
-    let _ = ReturnValidator::common(result, effects, tree_exists)?;
-    ReturnValidator::<F>::open(result)
+    let (_, parsed) = ReturnValidator::common(result, effects, tree_exists)?;
+    ReturnValidator::<F>::open(result).map(|()| parsed)
 }
-pub(crate) fn validate_chunk<F>(
+pub(crate) fn validate_chunk<'a, F>(
     result: &std::result::Result<wit_types::ReadChunkResult, wit_types::ProviderError>,
-    effects: &wit_types::Effects,
+    effects: &'a wit_types::Effects,
     requested_length: u32,
     tree_exists: F,
-) -> std::result::Result<(), String>
+) -> std::result::Result<ValidatedEffects<'a>, String>
 where
     F: Fn(u64) -> bool,
 {
-    let _ = ReturnValidator::common(result, effects, tree_exists)?;
-    ReturnValidator::<F>::chunk(result, requested_length)
+    let (_, parsed) = ReturnValidator::common(result, effects, tree_exists)?;
+    ReturnValidator::<F>::chunk(result, requested_length).map(|()| parsed)
 }
-pub(crate) fn validate_initialize<F>(
+pub(crate) fn validate_initialize<'a, F>(
     result: &std::result::Result<(), wit_types::ProviderError>,
-    effects: &wit_types::Effects,
+    effects: &'a wit_types::Effects,
     tree_exists: F,
-) -> std::result::Result<(), String>
+) -> std::result::Result<ValidatedEffects<'a>, String>
 where
     F: Fn(u64) -> bool,
 {
-    let _ = ReturnValidator::common(result, effects, tree_exists)?;
-    Ok(())
+    let (_, parsed) = ReturnValidator::common(result, effects, tree_exists)?;
+    Ok(parsed)
 }
-pub(crate) fn validate_event<F>(
+pub(crate) fn validate_event<'a, F>(
     result: &std::result::Result<(), wit_types::ProviderError>,
-    effects: &wit_types::Effects,
+    effects: &'a wit_types::Effects,
     tree_exists: F,
-) -> std::result::Result<(), String>
+) -> std::result::Result<ValidatedEffects<'a>, String>
 where
     F: Fn(u64) -> bool,
 {
-    let _ = ReturnValidator::common(result, effects, tree_exists)?;
-    Ok(())
+    let (_, parsed) = ReturnValidator::common(result, effects, tree_exists)?;
+    Ok(parsed)
 }
 
 fn effects_empty(effects: &wit_types::Effects) -> bool {

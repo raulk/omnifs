@@ -41,11 +41,20 @@ pub use client::{
     WireNamespace,
 };
 #[cfg(feature = "wire")]
-pub use server::{Endpoint, ListenerEvent, VfsServer, serve_connection};
+pub use server::{Endpoint, ListenerEvent, Session, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. Peers that disagree refuse to serve.
 #[cfg(feature = "wire")]
-pub const PROTOCOL: u32 = 10;
+pub const PROTOCOL: u32 = 11;
+
+/// Environment name carrying the TCP or vsock attach target for a filesystem
+/// runner.
+#[cfg(feature = "wire")]
+pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
+
+/// Environment name carrying the libkrun guest readiness vsock port.
+#[cfg(feature = "wire")]
+pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
 
 #[cfg(feature = "wire")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,8 +127,9 @@ pub(crate) struct WireReply {
 pub(crate) enum Handshake {
     Hello {
         protocol: u32,
-        client_owner: omnifs_core::ClientOwnerId,
-        filesystem: omnifs_core::fs::Spec,
+        filesystem: omnifs_core::ResourceName,
+        spec: omnifs_core::FilesystemSpec,
+        runtime_instance: String,
     },
     Welcome {
         protocol: u32,

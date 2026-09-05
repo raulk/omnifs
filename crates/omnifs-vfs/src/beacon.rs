@@ -4,7 +4,7 @@
 //! from outside the guest, so once its mount is live it dials host vsock on a
 //! well-known port and writes a single `ready\n` line; the invocation-scoped
 //! Libkrun launch lease accepts that beacon before publishing launch success
-//! (`crates/omnifs-cli/src/libkrun_runner.rs`). Non-fatal end to end: the FUSE
+//! (`crates/omnifs-daemon/src/fs_runtime/libkrun.rs`). Non-fatal end to end: the FUSE
 //! mount is served either way, so a timed-out wait or a failed dial only logs
 //! a warning.
 
@@ -44,11 +44,11 @@ pub enum ReadyPortError {
     UnsupportedPlatform { env: &'static str },
 }
 
-/// Parse `OMNIFS_READY_VSOCK_PORT` if set (only the libkrun guest's seed sets
+/// Parse [`crate::OMNIFS_READY_VSOCK_PORT_ENV`] if set (only the libkrun guest's seed sets
 /// it). Absence is valid for every other runner, but presence on a non-Linux
 /// target is an error: only the Linux libkrun guest can dial vsock.
 pub fn resolve_ready_vsock_port() -> Result<Option<u32>, ReadyPortError> {
-    ready_vsock_port_from_env(std::env::var(omnifs_api::OMNIFS_READY_VSOCK_PORT_ENV).ok())
+    ready_vsock_port_from_env(std::env::var(crate::OMNIFS_READY_VSOCK_PORT_ENV).ok())
 }
 
 /// The env-driven half of [`resolve_ready_vsock_port`], pulled out as a pure
@@ -62,13 +62,13 @@ fn ready_vsock_port_from_env(value: Option<String>) -> Result<Option<u32>, Ready
     {
         let _ = value;
         Err(ReadyPortError::UnsupportedPlatform {
-            env: omnifs_api::OMNIFS_READY_VSOCK_PORT_ENV,
+            env: crate::OMNIFS_READY_VSOCK_PORT_ENV,
         })
     }
     #[cfg(target_os = "linux")]
     {
         let port: u32 = value.parse().map_err(|source| ReadyPortError::Invalid {
-            env: omnifs_api::OMNIFS_READY_VSOCK_PORT_ENV,
+            env: crate::OMNIFS_READY_VSOCK_PORT_ENV,
             value,
             source,
         })?;

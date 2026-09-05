@@ -21,16 +21,19 @@ use crate::{
     NamespaceEvent, NsError, NsEvent, ReadAnswer,
 };
 use futures::future::{BoxFuture, FutureExt};
-use omnifs_core::{ClientOwnerId, fs, path::Path};
+use omnifs_core::{FilesystemSpec, ResourceName, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::frame::KIND_CONTROL;
-use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
-use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireReply, WireRequest, WireResponse};
+use crate::frame::{Frame, KIND_CONTROL, KIND_EVENT, KIND_HEARTBEAT, KIND_REQUEST, KIND_RESPONSE};
+use crate::frame::{read_frame, write_frame};
+use crate::{
+    Handshake, OMNIFS_ATTACH_ADDR_ENV, PROTOCOL, ServerControl, WireError, WireReply, WireRequest,
+    WireResponse,
+};
 
 /// Deadline for the first attach and each reconnect attempt. A target that
 /// never answers triggers filesystem-owned teardown instead of leaving a mount
@@ -47,6 +50,8 @@ const STALE_RESPONSE_RETRIES: usize = 3;
 const OUTGOING_QUEUE_CAPACITY: usize = 128;
 const FRAME_QUEUE_CAPACITY: usize = 256;
 const MAX_PENDING_REQUESTS: usize = OUTGOING_QUEUE_CAPACITY;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 /// Where a [`WireNamespace`] dials the daemon it attaches to.
 ///
 /// `Unix` is the host-native path: auth is filesystem permissions on the
@@ -75,7 +80,7 @@ impl AttachTarget {
         if let Some(socket) = attach {
             return Ok(Self::Unix(socket));
         }
-        Self::from_env(std::env::var(omnifs_api::OMNIFS_ATTACH_ADDR_ENV).ok())
+        Self::from_env(std::env::var(OMNIFS_ATTACH_ADDR_ENV).ok())
     }
 
     /// Parse the env-driven target from an explicit value so validation remains
@@ -86,13 +91,13 @@ impl AttachTarget {
     /// the filesystem container's DNS and cannot be resolved by the host CLI.
     fn from_env(addr: Option<String>) -> Result<Self, AttachTargetError> {
         let addr = addr.ok_or(AttachTargetError::Missing {
-            env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+            env: OMNIFS_ATTACH_ADDR_ENV,
         })?;
         if let Some(port) = addr.strip_prefix("vsock:") {
             let port: u32 = port
                 .parse()
                 .map_err(|source| AttachTargetError::InvalidVsockPort {
-                    env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+                    env: OMNIFS_ATTACH_ADDR_ENV,
                     addr: addr.clone(),
                     source,
                 })?;
@@ -103,7 +108,7 @@ impl AttachTarget {
             .is_none_or(|(_, port)| port.parse::<u16>().is_err())
         {
             return Err(AttachTargetError::InvalidAddr {
-                env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
+                env: OMNIFS_ATTACH_ADDR_ENV,
                 addr,
             });
         }
@@ -112,20 +117,25 @@ impl AttachTarget {
 
     /// Connect with backoff. With a `deadline`, a transient failure past the
     /// deadline surfaces as [`WireError::ConnectTimeout`]; without one,
-    /// transient failures retry forever. `identity` is sent in every attempt's
-    /// Hello (including reconnects), since a fresh connection is a fresh
-    /// handshake.
+    /// transient failures retry forever. Every attempt sends the same exact
+    /// filesystem identity, since a fresh connection is a fresh handshake.
     async fn connect_with_backoff(
         &self,
         deadline: Option<Instant>,
-        client_owner: ClientOwnerId,
-        identity: &fs::Spec,
+        filesystem: &ResourceName,
+        spec: &FilesystemSpec,
+        runtime_instance: &str,
     ) -> Result<Connection, WireError> {
         let mut backoff = INITIAL_BACKOFF;
         loop {
             let attempt = if let Some(deadline) = deadline {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                match timeout(remaining, self.connect_once(client_owner, identity)).await {
+                match timeout(
+                    remaining,
+                    self.connect_once(filesystem, spec, runtime_instance),
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(_) => Err(WireError::ConnectTimeout {
                         target: self.to_string(),
@@ -136,7 +146,7 @@ impl AttachTarget {
                     }),
                 }
             } else {
-                self.connect_once(client_owner, identity).await
+                self.connect_once(filesystem, spec, runtime_instance).await
             };
             match attempt {
                 Ok(value) => return Ok(value),
@@ -179,28 +189,47 @@ impl AttachTarget {
     /// fail without entering the reconnect loop.
     async fn connect_once(
         &self,
-        client_owner: ClientOwnerId,
-        identity: &fs::Spec,
+        filesystem: &ResourceName,
+        spec: &FilesystemSpec,
+        runtime_instance: &str,
     ) -> Result<Connection, WireError> {
         match self {
             Self::Unix(path) => {
                 let stream = UnixStream::connect(path).await?;
-                handshake_over(stream, client_owner, identity.clone()).await
+                handshake_over(
+                    stream,
+                    filesystem.clone(),
+                    spec.clone(),
+                    runtime_instance.to_owned(),
+                )
+                .await
             },
             Self::Tcp { addr } => {
                 let stream = TcpStream::connect(addr.as_str()).await?;
-                handshake_over(stream, client_owner, identity.clone()).await
+                handshake_over(
+                    stream,
+                    filesystem.clone(),
+                    spec.clone(),
+                    runtime_instance.to_owned(),
+                )
+                .await
             },
             Self::Vsock { port } => {
                 #[cfg(target_os = "linux")]
                 {
                     let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_HOST, *port);
                     let stream = tokio_vsock::VsockStream::connect(addr).await?;
-                    handshake_over(stream, client_owner, identity.clone()).await
+                    handshake_over(
+                        stream,
+                        filesystem.clone(),
+                        spec.clone(),
+                        runtime_instance.to_owned(),
+                    )
+                    .await
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let _ = (port, client_owner, identity);
+                    let _ = (port, filesystem, spec, runtime_instance);
                     Err(WireError::VsockUnsupported)
                 }
             },
@@ -283,11 +312,22 @@ pub struct WireNamespace {
     _manager: AbortOnDrop,
 }
 
+// Keep each request's expected wire variant at its call site while sharing the
+// corrupt-peer mismatch path.
+macro_rules! expect_response {
+    ($response:expr, $variant:path $(,)?) => {
+        match $response {
+            $variant(answer) => answer,
+            _ => Err(variant_mismatch()),
+        }
+    };
+}
+
 impl WireNamespace {
     /// Connect to the namespace target, perform the handshake, and return a
-    /// namespace multiplexed over the connection. `identity` names this
-    /// filesystem in every Hello (the initial connect and every later
-    /// reconnect), so the server-side filesystem registry can track it live.
+    /// namespace multiplexed over the connection. The filesystem name, exact
+    /// desired spec, and random runtime instance identify every Hello,
+    /// including reconnects, so the server can track one live session.
     /// Retries the initial connect with backoff up to a 30s deadline; a later
     /// disconnect reconnects forever.
     ///
@@ -298,25 +338,28 @@ impl WireNamespace {
     /// the handshake is rejected.
     pub async fn attach(
         target: AttachTarget,
-        client_owner: ClientOwnerId,
-        identity: fs::Spec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
+        runtime_instance: String,
         rt: Handle,
     ) -> Result<Arc<Self>, WireError> {
         let (teardown_tx, teardown_rx) = mpsc::channel(1);
         drop(teardown_rx);
-        Self::attach_with_teardown(target, client_owner, identity, rt, teardown_tx).await
+        Self::attach_with_teardown(target, filesystem, spec, runtime_instance, rt, teardown_tx)
+            .await
     }
 
     pub async fn attach_with_teardown(
         target: AttachTarget,
-        client_owner: ClientOwnerId,
-        identity: fs::Spec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
+        runtime_instance: String,
         rt: Handle,
         teardown: mpsc::Sender<TeardownRequest>,
     ) -> Result<Arc<Self>, WireError> {
         let deadline = Instant::now() + ATTACH_DEADLINE;
         let connection = target
-            .connect_with_backoff(Some(deadline), client_owner, &identity)
+            .connect_with_backoff(Some(deadline), &filesystem, &spec, &runtime_instance)
             .await?;
 
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Outgoing>(OUTGOING_QUEUE_CAPACITY);
@@ -325,8 +368,9 @@ impl WireNamespace {
         let manager = rt.spawn(
             ManagerState {
                 target,
-                client_owner,
-                identity,
+                filesystem,
+                spec,
+                runtime_instance,
                 connection,
                 current_epoch,
                 outgoing_rx,
@@ -366,10 +410,10 @@ impl WireNamespace {
     }
 
     async fn read_request(&self, path: Path, offset: u64, len: u32) -> Result<ReadAnswer, NsError> {
-        match self.call(WireRequest::Read { path, offset, len }).await? {
-            WireResponse::Read(answer) => answer,
-            _ => Err(variant_mismatch()),
-        }
+        expect_response!(
+            self.call(WireRequest::Read { path, offset, len }).await?,
+            WireResponse::Read
+        )
     }
 }
 
@@ -389,39 +433,34 @@ impl Namespace for WireNamespace {
     ) -> BoxFuture<'a, Result<LookupAnswer, NsError>> {
         let name = name.to_string();
         async move {
-            let answer = match self
-                .call(WireRequest::Lookup {
+            expect_response!(
+                self.call(WireRequest::Lookup {
                     parent,
                     name: name.clone(),
                 })
-                .await?
-            {
-                WireResponse::Lookup(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(answer)
+                .await?,
+                WireResponse::Lookup,
+            )
         }
         .boxed()
     }
 
     fn getattr(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            let attrs = match self.call(WireRequest::Getattr { path }).await? {
-                WireResponse::Getattr(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(attrs)
+            expect_response!(
+                self.call(WireRequest::Getattr { path }).await?,
+                WireResponse::Getattr
+            )
         }
         .boxed()
     }
 
     fn getattr_exact(&self, path: Path) -> BoxFuture<'_, Result<Attrs, NsError>> {
         async move {
-            let attrs = match self.call(WireRequest::GetattrExact { path }).await? {
-                WireResponse::GetattrExact(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(attrs)
+            expect_response!(
+                self.call(WireRequest::GetattrExact { path }).await?,
+                WireResponse::GetattrExact,
+            )
         }
         .boxed()
     }
@@ -433,18 +472,15 @@ impl Namespace for WireNamespace {
         budget: usize,
     ) -> BoxFuture<'_, Result<DirPage, NsError>> {
         async move {
-            let page = match self
-                .call(WireRequest::Readdir {
+            expect_response!(
+                self.call(WireRequest::Readdir {
                     path,
                     cursor,
                     budget: budget as u64,
                 })
-                .await?
-            {
-                WireResponse::Readdir(answer) => answer?,
-                _ => return Err(variant_mismatch()),
-            };
-            Ok(page)
+                .await?,
+                WireResponse::Readdir,
+            )
         }
         .boxed()
     }
@@ -460,10 +496,10 @@ impl Namespace for WireNamespace {
 
     fn readlink(&self, path: Path) -> BoxFuture<'_, Result<PathBuf, NsError>> {
         async move {
-            match self.call(WireRequest::Readlink { path }).await? {
-                WireResponse::Readlink(answer) => answer,
-                _ => Err(variant_mismatch()),
-            }
+            expect_response!(
+                self.call(WireRequest::Readlink { path }).await?,
+                WireResponse::Readlink
+            )
         }
         .boxed()
     }
@@ -480,10 +516,11 @@ impl Namespace for WireNamespace {
 /// The manager's owned connection and request state.
 struct ManagerState {
     target: AttachTarget,
-    client_owner: ClientOwnerId,
-    /// This filesystem's identity, sent in every reconnect's Hello (the initial
+    /// Exact filesystem identity sent in every reconnect's Hello (the initial
     /// connect sends it too, before the manager task is spawned).
-    identity: fs::Spec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
+    runtime_instance: String,
     connection: Connection,
     current_epoch: NamespaceEpoch,
     outgoing_rx: mpsc::Receiver<Outgoing>,
@@ -508,6 +545,10 @@ impl ManagerState {
         let mut next_request_id: u64 = 1;
         let mut reconnect: Option<tokio::task::JoinHandle<Result<Connection, WireError>>> = None;
         let mut teardown_retry: Option<Instant> = None;
+        let mut heartbeat_deadline = None;
+        let mut heartbeat =
+            tokio::time::interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -517,7 +558,9 @@ impl ManagerState {
 
                 frame = self.connection.frame_rx.recv(), if reconnect.is_none() => {
                     if let Some(frame) = frame {
-                        if self.handle_inbound(&frame, &mut pending) {
+                        if frame.kind == KIND_HEARTBEAT {
+                            heartbeat_deadline = None;
+                        } else if self.handle_inbound(&frame, &mut pending) {
                             if self.request_teardown(TeardownReason::ServerStop).await
                                 == TeardownOutcome::Stopped
                             {
@@ -527,13 +570,8 @@ impl ManagerState {
                         }
                     } else {
                         teardown_retry = None;
-                        let _ = self.events.send(NsEvent::reset());
-                        // The root invalidation is the first observable disconnect
-                        // signal. Complete requests that were already in flight only
-                        // after publishing it, so filesystems cannot process Network
-                        // without also seeing the ordering fence.
-                        fail_pending_network(&mut pending);
-                        reconnect = Some(self.start_reconnect());
+                        heartbeat_deadline = None;
+                        reconnect = Some(self.begin_reconnect(&mut pending));
                     }
                 }
 
@@ -546,14 +584,9 @@ impl ManagerState {
                 }, if reconnect.is_some() => {
                     match result {
                         Ok(connection) => {
-                            self.observe_epoch(connection.epoch);
-                            self.connection = connection;
+                            self.install_reconnection(connection);
                             reconnect = None;
-                            // No request accumulated while disconnected may be
-                            // replayed on the replacement connection.
-                            while let Ok(Outgoing { reply, .. }) = self.outgoing_rx.try_recv() {
-                                let _ = reply.send(Err(CallError::Namespace(NsError::Network)));
-                            }
+                            heartbeat_deadline = None;
                         },
                         Err(error) => {
                             tracing::warn!(%error, "wire: reconnect task ended");
@@ -564,6 +597,12 @@ impl ManagerState {
                             }
                             reconnect = Some(self.start_reconnect());
                         },
+                    }
+                }
+
+                _ = heartbeat.tick(), if reconnect.is_none() => {
+                    if self.heartbeat_requires_reconnect(&mut heartbeat_deadline, &mut pending) {
+                        reconnect = Some(self.start_reconnect());
                     }
                 }
 
@@ -583,52 +622,113 @@ impl ManagerState {
                 outgoing = self.outgoing_rx.recv(),
                     if reconnect.is_some() || pending.len() < MAX_PENDING_REQUESTS =>
                 {
-                    let Some(Outgoing { request, reply }) = outgoing else {
+                    let Some(outgoing) = outgoing else {
                         // The namespace was dropped: no more callers, stop.
                         return;
                     };
-                    if reconnect.is_some() {
-                        let _ = reply.send(Err(CallError::Namespace(NsError::Network)));
-                        continue;
-                    }
-                    let id = next_request_id;
-                    next_request_id = next_request_id.checked_add(1).unwrap_or(1);
-                    match postcard::to_allocvec(&request) {
-                        Ok(body) => {
-                            pending.insert(id, reply);
-                            if self
-                                .connection
-                                .frame_tx
-                                .try_send(Frame::new(id, KIND_REQUEST, body))
-                                .is_err()
-                                && let Some(reply) = pending.remove(&id)
-                            {
-                                // The writer is gone; the frame_rx `None` branch will
-                                // reconnect. Fail this request now.
-                                let _ = reply.send(Err(CallError::Namespace(NsError::Network)));
-                            }
-                        },
-                        Err(error) => {
-                            let _ = reply.send(Err(CallError::Namespace(NsError::Internal {
-                                message: format!("wire: request encode failed: {error}"),
-                            })));
-                        },
-                    }
+                    self.queue_outgoing(
+                        outgoing,
+                        reconnect.is_some(),
+                        &mut pending,
+                        &mut next_request_id,
+                    );
                 }
             }
         }
     }
 
+    fn queue_outgoing(
+        &mut self,
+        outgoing: Outgoing,
+        disconnected: bool,
+        pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, CallError>>>,
+        next_request_id: &mut u64,
+    ) {
+        let Outgoing { request, reply } = outgoing;
+        if disconnected {
+            let _ = reply.send(Err(CallError::Namespace(NsError::Network)));
+            return;
+        }
+        let id = *next_request_id;
+        *next_request_id = next_request_id.checked_add(1).unwrap_or(1);
+        match postcard::to_allocvec(&request) {
+            Ok(body) => {
+                pending.insert(id, reply);
+                if self
+                    .connection
+                    .frame_tx
+                    .try_send(Frame::new(id, KIND_REQUEST, body))
+                    .is_err()
+                    && let Some(reply) = pending.remove(&id)
+                {
+                    let _ = reply.send(Err(CallError::Namespace(NsError::Network)));
+                }
+            },
+            Err(error) => {
+                let _ = reply.send(Err(CallError::Namespace(NsError::Internal {
+                    message: format!("wire: request encode failed: {error}"),
+                })));
+            },
+        }
+    }
+
+    fn begin_reconnect(
+        &self,
+        pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, CallError>>>,
+    ) -> tokio::task::JoinHandle<Result<Connection, WireError>> {
+        let _ = self.events.send(NsEvent::reset());
+        // Publish the reset before failing in-flight calls, so filesystems
+        // cannot observe Network without the matching ordering fence.
+        fail_pending_network(pending);
+        self.start_reconnect()
+    }
+
+    fn install_reconnection(&mut self, connection: Connection) {
+        self.observe_epoch(connection.epoch);
+        self.connection = connection;
+        tracing::info!("wire: reconnected to namespace");
+        // Work queued while disconnected cannot cross into the new session.
+        while let Ok(Outgoing { reply, .. }) = self.outgoing_rx.try_recv() {
+            let _ = reply.send(Err(CallError::Namespace(NsError::Network)));
+        }
+    }
+
+    fn heartbeat_requires_reconnect(
+        &mut self,
+        deadline: &mut Option<Instant>,
+        pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, CallError>>>,
+    ) -> bool {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            tracing::warn!("wire: heartbeat timed out; reconnecting");
+        } else if deadline.is_some() {
+            return false;
+        } else if self
+            .connection
+            .frame_tx
+            .try_send(Frame::new(0, KIND_HEARTBEAT, Vec::new()))
+            .is_ok()
+        {
+            *deadline = Some(Instant::now() + HEARTBEAT_TIMEOUT);
+            return false;
+        }
+        let _ = self.events.send(NsEvent::reset());
+        fail_pending_network(pending);
+        *deadline = None;
+        true
+    }
+
     fn start_reconnect(&self) -> tokio::task::JoinHandle<Result<Connection, WireError>> {
         let target = self.target.clone();
-        let client_owner = self.client_owner;
-        let identity = self.identity.clone();
+        let filesystem = self.filesystem.clone();
+        let spec = self.spec.clone();
+        let runtime_instance = self.runtime_instance.clone();
         tokio::spawn(async move {
             target
                 .connect_with_backoff(
                     Some(Instant::now() + ATTACH_DEADLINE),
-                    client_owner,
-                    &identity,
+                    &filesystem,
+                    &spec,
+                    &runtime_instance,
                 )
                 .await
         })
@@ -729,12 +829,13 @@ impl Drop for Connection {
 }
 
 /// Spawn the reader/writer pumps over `stream` and complete the handshake,
-/// sending `filesystem` naming this connecting filesystem. Generic over the stream
-/// type so both transports share one handshake path.
+/// sending the filesystem's exact desired and runtime identities. Generic over
+/// the stream type so both transports share one handshake path.
 async fn handshake_over<S>(
     stream: S,
-    client_owner: ClientOwnerId,
-    filesystem: fs::Spec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
+    runtime_instance: String,
 ) -> Result<Connection, WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -743,8 +844,9 @@ where
 
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        client_owner,
         filesystem,
+        spec,
+        runtime_instance,
     })?;
     write_frame(&mut write_half, &Frame::new(0, KIND_REQUEST, hello)).await?;
     let welcome_frame = read_frame(&mut read_half)

@@ -99,8 +99,8 @@ impl TreeError {
 
 pub type Result<T> = std::result::Result<T, TreeError>;
 
-// Host `EngineError` variants: Wasmtime, ProviderProtocol(String),
-// ProviderError(wit_types::ProviderError).
+// Host `EngineError` variants: Wasmtime, ProviderAdmission(String),
+// ProviderProtocol(String), ProviderError(wit_types::ProviderError).
 // A typed `ProviderError` carries its `kind`/`retryable`/`retry-after` through
 // to the neutral `TreeErrorKind` so a renderer reproduces the right kernel
 // status (a `RateLimited` provider error must surface as EAGAIN, not EIO).
@@ -108,6 +108,7 @@ impl From<crate::EngineError> for TreeError {
     fn from(err: crate::EngineError) -> Self {
         match err {
             crate::EngineError::Wasmtime(error) => TreeError::internal(error.to_string()),
+            crate::EngineError::ProviderAdmission(message) => TreeError::internal(message),
             crate::EngineError::ProviderProtocol(msg) => TreeError::internal(msg),
             crate::EngineError::ProviderError(e) => TreeError {
                 kind: TreeErrorKind::from(

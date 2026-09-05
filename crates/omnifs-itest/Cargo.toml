@@ -8,6 +8,7 @@ homepage.workspace = true
 description = "Centralized integration tests and harnesses for omnifs providers"
 
 [dependencies]
+fs2 = { workspace = true }
 omnifs-api = { workspace = true }
 bytes = { workspace = true }
 hyper-util = { workspace = true }
@@ -16,6 +17,7 @@ omnifs-wit = { path = "../omnifs-wit", features = ["host-bindings"] }
 omnifs-core = { path = "../omnifs-core" }
 omnifs-provider = { workspace = true }
 omnifs-nfs = { workspace = true }
+omnifs-vfs = { workspace = true, features = ["wire"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-stream = { workspace = true }
@@ -27,6 +29,7 @@ time = { workspace = true, features = ["formatting"] }
 
 [dev-dependencies]
 omnifs-fuse = { workspace = true }
+omnifs-libkrun = { workspace = true }
 rusqlite = { workspace = true }
 base64 = "0.22"
 hickory-proto = "0.26"

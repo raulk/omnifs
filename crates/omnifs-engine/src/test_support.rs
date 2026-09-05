@@ -39,8 +39,8 @@ pub fn open_test_host(
 ) -> Result<crate::HostOnline, crate::HostError> {
     crate::HostOnline::open_runtime(crate::HostRuntimeOpen {
         projection: cache_dir.as_ref().to_path_buf(),
-        wasmtime: wasm_cache_dir(),
         clones: clone_dir.as_ref().to_path_buf(),
+        engine: crate::ComponentEngine::new(&wasm_cache_dir())?,
     })
 }
 
@@ -74,7 +74,7 @@ pub mod cache {
 
     pub fn mount(
         caches: &std::sync::Arc<Caches>,
-        name: &omnifs_core::MountName,
+        name: &omnifs_core::ResourceName,
         spec_source: &[u8],
         provider_id: omnifs_core::ProviderId,
     ) -> anyhow::Result<std::sync::Arc<crate::cache::mount::MountResources>> {
@@ -95,8 +95,10 @@ pub mod cache {
         let retry_fence = effects.invalidations.is_empty();
         let mut epoch = captured_epoch;
         for _ in 0..3 {
-            let transition = crate::effect_apply::EffectApplier::new(&runtime.resources)
-                .lower_effects(effects, crate::clock::now_millis())
+            let validated_effects = crate::op_validate::validate_event(&Ok(()), effects, |_| true)
+                .map_err(crate::EngineError::ProviderProtocol)?;
+            let transition = validated_effects
+                .lower(&runtime.resources, crate::clock::now_millis())
                 .map_err(|error| {
                     crate::EngineError::ProviderProtocol(format!(
                         "cache publication failed: {error}"
